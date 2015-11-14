@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <cuda.h>
 #include <cmath>
+#include <math.h>
 #include <glm/glm.hpp>
 #include "utilityCore.hpp"
 #include "kernel.h"
@@ -33,26 +34,28 @@ void checkCUDAError(const char *msg, int line = -1) {
 #define blockSize 128
 
 /*! Mass of one "planet." */
-#define planetMass 3e8f
-
-/*! Mass of the "star" at the center. */
-#define starMass 5e10f
-
-/*! Size of the starting area in simulation space. */
-const float scene_scale = 1e2;
+#define robotRadius 1
 
 
 /***********************************************
  * Kernel state (pointers are device pointers) *
  ***********************************************/
 
-int numObjects;
+int numAgents;
 dim3 threadsPerBlock(blockSize);
 
-glm::vec3 *dev_pos;
-glm::vec3 *dev_vel;
-glm::vec3 *dev_acc;
+float scene_scale = 100.0;
 
+struct agent{
+	glm::vec3 pos;
+	glm::vec3 vel;
+	glm::vec3 goal;
+	float radius;
+};
+
+glm::vec3 *dev_pos;
+
+agent *dev_agents;
 
 /******************
  * initSimulation *
@@ -78,34 +81,33 @@ __host__ __device__ glm::vec3 generateRandomVec3(float time, int index) {
     return glm::vec3((float)unitDistrib(rng), (float)unitDistrib(rng), (float)unitDistrib(rng));
 }
 
-/**
- * CUDA kernel for generating planets with a specified mass randomly around the star.
- */
-__global__ void kernGenerateRandomPosArray(int time, int N, glm::vec3 * arr, float scale, float mass) {
-    int index = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (index < N) {
-        glm::vec3 rand = generateRandomVec3(time, index);
-        arr[index].x = scale * rand.x;
-        arr[index].y = scale * rand.y;
-        arr[index].z = 0.1 * scale * sqrt(rand.x * rand.x + rand.y * rand.y) * rand.z;
-    }
+__global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	if (index < N){
+		float rad = ((float)index / (float)N) * (2.0f * 3.1415f);
+		agents[index].pos.x = scale * radius * cos(rad);
+		agents[index].pos.y = scale * radius * sin(rad);
+		agents[index].pos.z = 0.0;
+		agents[index].goal = -agents[index].pos;
+	}
 }
 
-/**
- * CUDA kernel for generating velocities in a vortex around the origin.
- * This is just to make for an interesting-looking scene.
- */
-__global__ void kernGenerateCircularVelArray(int time, int N, glm::vec3 * arr, glm::vec3 * pos) {
-    int index = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (index < N) {
-        glm::vec3 R = glm::vec3(pos[index].x, pos[index].y, pos[index].z);
-        float r = glm::length(R) + EPSILON;
-        float s = sqrt(G * starMass / r);
-        glm::vec3 D = glm::normalize(glm::cross(R / r, glm::vec3(0, 0, 1)));
-        arr[index].x = s * D.x;
-        arr[index].y = s * D.y;
-        arr[index].z = s * D.z;
-    }
+__global__ void kernInitCircularPosArray(int N, glm::vec3* arr, float scale, float radius){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+	if (index < N){
+		float rad = ((float)index/(float)N) * (2.0f * 3.1415f);
+		arr[index].x = scale * radius * cos(rad);
+		arr[index].y = scale * radius * sin(rad);
+		arr[index].z = 0.0;
+	}
+}
+
+__global__ void kernInitCircularGoalsArray(int N, glm::vec3* goals, glm::vec3* starts, float scale, float radius){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+	if (index < N){
+		goals[index] = -starts[index];
+	}
 }
 
 /**
@@ -113,23 +115,17 @@ __global__ void kernGenerateCircularVelArray(int time, int N, glm::vec3 * arr, g
  */
 void Nbody::initSimulation(int N) {
 	//N = 5;
-    numObjects = N;
+	numAgents = N;
     dim3 fullBlocksPerGrid((N + blockSize - 1) / blockSize);
 
     cudaMalloc((void**)&dev_pos, N * sizeof(glm::vec3));
     checkCUDAErrorWithLine("cudaMalloc dev_pos failed!");
 
-    cudaMalloc((void**)&dev_vel, N * sizeof(glm::vec3));
-    checkCUDAErrorWithLine("cudaMalloc dev_vel failed!");
+	cudaMalloc((void**)&dev_agents, N*sizeof(agent));
+	checkCUDAErrorWithLine("cudaMalloc dev_goals failed!");
 
-    cudaMalloc((void**)&dev_acc, N * sizeof(glm::vec3));
-    checkCUDAErrorWithLine("cudaMalloc dev_acc failed!");
-
-    kernGenerateRandomPosArray<<<fullBlocksPerGrid, blockSize>>>(1, numObjects, dev_pos, scene_scale, planetMass);
-    checkCUDAErrorWithLine("kernGenerateRandomPosArray failed!");
-
-    kernGenerateCircularVelArray<<<fullBlocksPerGrid, blockSize>>>(2, numObjects, dev_vel, dev_pos);
-    checkCUDAErrorWithLine("kernGenerateCircularVelArray failed!");
+	kernInitAgents<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents, scene_scale, 0.5);
+	checkCUDAErrorWithLine("kernInitAgents failed!");
 
     cudaThreadSynchronize();
 }
@@ -159,9 +155,9 @@ __global__ void kernCopyPlanetsToVBO(int N, glm::vec3 *pos, float *vbo, float s_
  * Wrapper for call to the kernCopyPlanetsToVBO CUDA kernel.
  */
 void Nbody::copyPlanetsToVBO(float *vbodptr) {
-    dim3 fullBlocksPerGrid((int)ceil(float(numObjects) / float(blockSize)));
+    dim3 fullBlocksPerGrid((int)ceil(float(numAgents) / float(blockSize)));
 
-    kernCopyPlanetsToVBO<<<fullBlocksPerGrid, blockSize>>>(numObjects, dev_pos, vbodptr, scene_scale);
+    kernCopyPlanetsToVBO<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_pos, vbodptr, scene_scale);
     checkCUDAErrorWithLine("copyPlanetsToVBO failed!");
 
     cudaThreadSynchronize();
@@ -172,90 +168,29 @@ void Nbody::copyPlanetsToVBO(float *vbodptr) {
  * stepSimulation *
  ******************/
 
- __device__ glm::vec3 single_accelerate(glm::vec3 this_planet, glm::vec3 other_planet, int isPlanet){
-	// isPlanet: 1 if true, else 0
+__device__ glm::vec3 clearPathVelocity(){
 
-	glm::vec3 dir = glm::normalize(other_planet - this_planet);
-	float r = glm::length(other_planet - this_planet);
-	float r2 = r*r + EPSILON;
-	float mass = planetMass*isPlanet + starMass*(1-isPlanet);
-	float s = (G * mass / r2);
-	
-	glm::vec3 g;
-	g.x = dir.x * s;
-	g.y = dir.y * s;
-	g.z = dir.z * s;
-	return g;
- }
+}
 
-/**
- * Compute the acceleration on a body at `my_pos` due to the `N` bodies in the array `other_planets`.
- */
-__device__  glm::vec3 accelerate(int N, int iSelf, glm::vec3 this_planet, const glm::vec3 *other_planets) {
-    // TODO: Compute the acceleration on `my_pos` due to:
-    //   * The star at the origin (with mass `starMass`)
-    //   * All of the *other* planets (with mass `planetMass`)
-    // Return the sum of all of these contributions.
+__global__ void kernUpdateVel(int N, float dt, agent *dev_agents){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-    // HINT: You may want to write a helper function that will compute the acceleration at
-    //   a single point due to a single other mass. Be careful that you protect against
-    //   division by very small numbers.
-    // HINT: Use Newtonian gravitational acceleration:
-    //       G M
-    //  g = -----
-    //       r^2
-    //  where:
-    //    * G is the universal gravitational constant (already defined for you)
-    //    * M is the mass of the other object
-    //    * r is the distance between this object and the other object
-
-	glm::vec3 single_acc;
-	glm::vec3 total_acc(0.0f, 0.0f, 0.0f);
-
-	total_acc += single_accelerate(this_planet, glm::vec3(0.0f), 0);
-	for (int i=0; i<N; ++i){
-		if(i == iSelf){
-			continue;
+	if (index < N){
+		dev_agents[index].vel = glm::normalize(dev_agents[index].goal - dev_agents[index].pos);
+		if (glm::distance(dev_agents[index].goal, dev_agents[index].pos) < 0.1){
+			dev_agents[index].vel = glm::vec3(0.0);
 		}
-		single_acc = single_accelerate(this_planet, other_planets[i], 1);
-		total_acc += single_acc;
+
+		dev_agents[index].pos = dev_agents[index].pos + dev_agents[index].vel * dt;
 	}
-    
-    return total_acc;
 }
 
-/**
- * For each of the `N` bodies, update its acceleration.
- * Compute the total instantaneous acceleration using `accelerate`, then store that into `acc`.
- */
-__global__ void kernUpdateAcc(int N, float dt, const glm::vec3 *pos, glm::vec3 *acc) {
-    // TODO: implement updateAccArray.
-    // This function body runs once on each CUDA thread.
-    // To avoid race conditions, each instance should only write ONE value to `acc`!
+__global__ void kernUpdatePos(int N, agent *dev_agents, glm::vec3 *dev_pos){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-	int i = threadIdx.x + (blockIdx.x * blockDim.x);
-
-	//int i = threadIdx.x;
-	if (i < N){
-		acc[i] = accelerate(N,i,pos[i],pos);
+	if (index < N){
+		dev_pos[index] = dev_agents[index].pos;
 	}
-
-}
-
-/**
- * For each of the `N` bodies, update its velocity, then update its position, using a
- * simple Euler integration scheme. Acceleration must be updated before calling this kernel.
- */
-__global__ void kernUpdateVelPos(int N, float dt, glm::vec3 *pos, glm::vec3 *vel, const glm::vec3 *acc) {
-    // TODO: implement updateVelocityPosition
-	//int i = threadIdx.x;
-	int i = threadIdx.x + (blockIdx.x * blockDim.x);
-
-	if (i < N){
-		vel[i] = vel[i] + acc[i]*dt;
-		pos[i] = pos[i] + vel[i]*dt;
-	}
-
 }
 
 /**
@@ -265,11 +200,11 @@ void Nbody::stepSimulation(float dt) {
     // TODO: Using the CUDA kernels you wrote above, write a function that
     // calls the kernels to perform a full simulation step.
 
-	dim3 fullBlocksPerGrid((numObjects + blockSize - 1) / blockSize);
-
-	// Kernel acc update
-	kernUpdateAcc<<<fullBlocksPerGrid, blockSize>>>(numObjects, dt, dev_pos, dev_acc);
+	dim3 fullBlocksPerGrid((numAgents + blockSize - 1) / blockSize);
 
 	// Kernel vel update
-	kernUpdateVelPos<<<fullBlocksPerGrid, blockSize>>>(numObjects, dt, dev_pos, dev_vel, dev_acc);
+	//kernUpdateVelPos<<<fullBlocksPerGrid, blockSize>>>(numObjects, dt, dev_pos, dev_goals, dev_vel, dev_acc);
+	kernUpdateVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents);
+
+	kernUpdatePos<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents, dev_pos);
 }
