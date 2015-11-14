@@ -93,23 +93,6 @@ __global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
 	}
 }
 
-__global__ void kernInitCircularPosArray(int N, glm::vec3* arr, float scale, float radius){
-	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
-	if (index < N){
-		float rad = ((float)index/(float)N) * (2.0f * 3.1415f);
-		arr[index].x = scale * radius * cos(rad);
-		arr[index].y = scale * radius * sin(rad);
-		arr[index].z = 0.0;
-	}
-}
-
-__global__ void kernInitCircularGoalsArray(int N, glm::vec3* goals, glm::vec3* starts, float scale, float radius){
-	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
-	if (index < N){
-		goals[index] = -starts[index];
-	}
-}
-
 /**
  * Initialize memory, update some globals
  */
@@ -129,7 +112,6 @@ void Nbody::initSimulation(int N) {
 
     cudaThreadSynchronize();
 }
-
 
 /******************
  * copyPlanetsToVBO *
