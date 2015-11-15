@@ -145,7 +145,6 @@ void Nbody::copyPlanetsToVBO(float *vbodptr) {
     cudaThreadSynchronize();
 }
 
-
 /******************
  * stepSimulation *
  ******************/
@@ -154,23 +153,34 @@ __device__ glm::vec3 clearPathVelocity(){
 
 }
 
-__global__ void kernUpdateVel(int N, float dt, agent *dev_agents){
+__global__ void kernUpdateDesVel(int N, agent *dev_agents){
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
 	if (index < N){
+		// Get desired velocity
 		dev_agents[index].vel = glm::normalize(dev_agents[index].goal - dev_agents[index].pos);
 		if (glm::distance(dev_agents[index].goal, dev_agents[index].pos) < 0.1){
 			dev_agents[index].vel = glm::vec3(0.0);
 		}
-
-		dev_agents[index].pos = dev_agents[index].pos + dev_agents[index].vel * dt;
 	}
 }
 
-__global__ void kernUpdatePos(int N, agent *dev_agents, glm::vec3 *dev_pos){
+__global__ void kernUpdateVel(int N, float dt, agent *dev_agents){
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
 	if (index < N){
+		// Get ClearPath adjusted velocity
+
+
+	}
+}
+
+__global__ void kernUpdatePos(int N, float dt, agent *dev_agents, glm::vec3 *dev_pos){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	if (index < N){
+		// Update positions
+		dev_agents[index].pos = dev_agents[index].pos + dev_agents[index].vel * dt;
 		dev_pos[index] = dev_agents[index].pos;
 	}
 }
@@ -179,14 +189,15 @@ __global__ void kernUpdatePos(int N, agent *dev_agents, glm::vec3 *dev_pos){
  * Step the entire N-body simulation by `dt` seconds.
  */
 void Nbody::stepSimulation(float dt) {
-    // TODO: Using the CUDA kernels you wrote above, write a function that
-    // calls the kernels to perform a full simulation step.
 
 	dim3 fullBlocksPerGrid((numAgents + blockSize - 1) / blockSize);
 
-	// Kernel vel update
-	//kernUpdateVelPos<<<fullBlocksPerGrid, blockSize>>>(numObjects, dt, dev_pos, dev_goals, dev_vel, dev_acc);
+	// Update all the desired velocities
+	kernUpdateDesVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents);
+
+	// Update the velocities according to ClearPath
 	kernUpdateVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents);
 
-	kernUpdatePos<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents, dev_pos);
+	// Update the positions
+	kernUpdatePos<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents, dev_pos);
 }
