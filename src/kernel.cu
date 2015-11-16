@@ -4,6 +4,7 @@
 #include <cmath>
 #include <math.h>
 #include <glm/glm.hpp>
+#include <glm/gtx/rotate_vector.hpp>
 #include "utilityCore.hpp"
 #include "kernel.h"
 
@@ -26,6 +27,125 @@ void checkCUDAError(const char *msg, int line = -1) {
 }
 
 
+/*******************
+* Helper classes   *
+********************/
+struct agent{
+	glm::vec3 pos;
+	glm::vec3 vel;
+	glm::vec3 goal;
+	float radius;
+};
+
+struct ray{
+	glm::vec3 pos;
+	glm::vec3 dir;
+};
+
+struct constraint{
+	glm::vec3 norm;
+	ray ray;
+};
+
+struct segment{
+	glm::vec3 pos1;
+	glm::vec3 pos2;
+};
+
+struct FVO{
+	constraint R;
+	constraint L;
+	constraint T;
+};
+
+/*******************
+* Helper functions *
+********************/
+
+// Computes the intersection between 2 rays
+// point is the intersection, bool returns true if there is an intersection, false otherwise
+__host__ __device__ bool intersectRayRay(ray a, ray b, glm::vec3 &point){
+	// Solves p1 + t1*v1 = p2 + t2*v2
+	// [t1; t2] = [v1x -v2x; v1y -v2y]^-1*(p2-p1);
+	
+	// Parallel lines cannot intersect
+	if (a.dir.x == b.dir.x && a.dir.y == b.dir.y){
+		return false;
+	}
+
+	glm::vec2 ts;
+
+	ts = glm::inverse(glm::mat2(a.dir.x, a.dir.y, -b.dir.x, -b.dir.y)) * glm::vec2(b.pos - a.pos);
+
+	if (ts.x >= 0 && ts.y >= 0){
+		point = glm::vec3(a.pos+a.dir*ts.x);
+		point.z = 0.0;
+		return true;
+	}
+	return false;
+}
+
+__host__ __device__ glm::vec3 intersectPointRay(ray a, glm::vec3 p){
+	// Finds the ray with minimal distance from a point to a ray
+	// http://stackoverflow.com/questions/5227373/minimal-perpendicular-vector-between-a-point-and-a-line
+	
+	return p - (a.pos + (glm::normalize(p-a.pos))*a.dir);
+}
+
+__host__ __device__ FVO computeFVO(agent A, agent B){
+	glm::vec3 pAB = B.pos - A.pos;
+	float radius = A.radius + B.radius;
+
+	FVO fvo;
+	constraint T, L, R;
+
+	// Compute pAB perpendicular
+	// TODO: how do I figure out which direction this should be on?
+	glm::vec3 pABp = glm::vec3(0.0);
+	pABp.x = -pAB.y;
+	pABp.y = -pAB.x;
+
+	// Compute FVO_T
+	float sep = glm::length(pAB) - radius;
+	float n = glm::tan(glm::asin(radius / glm::length(pAB)))*sep;
+	glm::vec3 M = sep*glm::normalize(pAB) + ((A.vel+B.vel)/2.0f);
+	
+	T.ray.pos = M - glm::normalize(pABp)*n;
+	T.ray.dir = glm::normalize(pABp);
+	T.norm = glm::normalize(pAB);
+
+	fvo.T = T;
+
+	// Compute FVO_L
+	glm::vec3 apex = A.pos + (A.vel + B.vel) / 2.0f;
+	float theta = glm::asin(radius / glm::length(pAB));
+
+	glm::vec3 rotatedL = glm::rotate(pAB, theta, glm::vec3(0.0,0.0,1.0));
+
+	L.ray.pos = T.ray.pos;
+	L.ray.dir = glm::normalize(rotatedL);
+	ray pABl;
+	pABl.pos = apex;
+	pABl.dir = L.ray.dir;
+	L.norm = glm::normalize(intersectPointRay(pABl, B.pos));
+
+	// Compute FVO_R
+	glm::vec3 rotatedR = glm::rotate(pAB, -theta, glm::vec3(0.0,0.0,1.0));
+
+	R.ray.pos = M + glm::normalize(pABp)*n;
+	R.ray.dir = glm::normalize(rotatedR);
+	ray pABr;
+	pABr.pos = apex;
+	pABr.dir = R.ray.dir;
+	R.norm = glm::normalize(intersectPointRay(pABr, B.pos));
+
+	fvo.T = T;
+	fvo.L = L;
+	fvo.R = R;
+
+	return fvo;
+}
+
 /*****************
  * Configuration *
  *****************/
@@ -33,9 +153,7 @@ void checkCUDAError(const char *msg, int line = -1) {
 /*! Block size used for CUDA kernel launch. */
 #define blockSize 128
 
-/*! Mass of one "planet." */
 #define robotRadius 1
-
 
 /***********************************************
  * Kernel state (pointers are device pointers) *
@@ -46,15 +164,7 @@ dim3 threadsPerBlock(blockSize);
 
 float scene_scale = 100.0;
 
-struct agent{
-	glm::vec3 pos;
-	glm::vec3 vel;
-	glm::vec3 goal;
-	float radius;
-};
-
 glm::vec3 *dev_pos;
-
 agent *dev_agents;
 
 /******************
@@ -150,7 +260,7 @@ void Nbody::copyPlanetsToVBO(float *vbodptr) {
  ******************/
 
 __device__ glm::vec3 clearPathVelocity(){
-
+	return glm::vec3();
 }
 
 __global__ void kernUpdateDesVel(int N, agent *dev_agents){
