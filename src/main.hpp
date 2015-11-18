@@ -28,6 +28,7 @@ GLuint displayImage;
 GLuint program[2];
 
 const unsigned int PROG_PLANET = 0;
+const unsigned int PROG_LINE = 1;
 
 const float fovy = (float) (PI / 4);
 const float zNear = 0.10f;

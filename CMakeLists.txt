@@ -80,7 +80,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
 add_custom_command(
     TARGET ${CMAKE_PROJECT_NAME}
-    POST_BUILD
+    PRE_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_SOURCE_DIR}/shaders
         ${CMAKE_BINARY_DIR}/shaders

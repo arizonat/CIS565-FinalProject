@@ -92,6 +92,28 @@ __host__ __device__ glm::vec3 intersectPointRay(ray a, glm::vec3 p){
 	return p - (a.pos + (glm::normalize(p-a.pos))*a.dir);
 }
 
+__host__ __device__ int sidePointSegment(ray r, glm::vec3 p){
+	// Computes what side of a line a point is on
+	// http://stackoverflow.com/questions/1560492/how-to-tell-whether-a-point-is-to-the-right-or-left-side-of-a-line
+	// If ray pointing up in 2D: +1 is left, 0 is on line, -1 is right
+
+	glm::vec3 a = r.pos;
+	glm::vec3 b = r.pos + r.dir;
+
+	return sign((b.x-a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x));
+}
+
+__host__ __device__ bool pointInFVO(FVO fvo, glm::vec3 p){
+	// True if point is inside FVO, false otherwise (on border means it is NOT inside the FVO)
+	// Basically check to see if all constraints are satisfied
+
+	int fvol_sat = sidePointSegment(fvo.L.ray, p); // should be negative
+	int fvor_sat = sidePointSegment(fvo.R.ray, p); // should be positive
+	int fvot_sat = sidePointSegment(fvo.T.ray, p); // should be positive
+
+	return (fvol_sat < 0) && (fvor_sat > 0) && (fvot_sat > 0);
+}
+
 __host__ __device__ FVO computeFVO(agent A, agent B){
 	glm::vec3 pAB = B.pos - A.pos;
 	float radius = A.radius + B.radius;
@@ -234,6 +256,7 @@ __global__ void kernCopyPlanetsToVBO(int N, glm::vec3 *pos, float *vbo, float s_
     int index = threadIdx.x + (blockIdx.x * blockDim.x);
 
     float c_scale = -1.0f / s_scale;
+	//float c_scale = 1.0f;
 
     if (index < N) {
         vbo[4 * index + 0] = pos[index].x * c_scale;

@@ -14,7 +14,7 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 10;
+const int N_FOR_VIS = 4;
 const float DT = 0.2f;
 
 /**
@@ -77,8 +77,12 @@ bool init(int argc, char **argv) {
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    
+	// TODO: original lines
+	//glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+    //glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+	glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_FALSE);
+	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
 
     window = glfwCreateWindow(width, height, deviceName.c_str(), NULL, NULL);
     if (!window) {
@@ -140,7 +144,6 @@ void initVAO() {
         bindices[i] = i;
     }
 
-
     glGenVertexArrays(1, &planetVAO);
     glGenBuffers(1, &planetVBO);
     glGenBuffers(1, &planetIBO);
@@ -157,7 +160,6 @@ void initVAO() {
     glVertexAttribPointer((GLuint)positionLocation, 4, GL_FLOAT, GL_FALSE, 0, 0);
 
     glBindVertexArray(0);
-
 
     delete[] bodies;
     delete[] bindices;
@@ -178,6 +180,11 @@ void initShaders(GLuint * program) {
     if ((location = glGetUniformLocation(program[PROG_PLANET], "u_cameraPos")) != -1) {
         glUniform3fv(location, 1, &cameraPosition[0]);
     }
+
+	program[PROG_LINE] = glslUtility::createProgram("shaders/line.vert.glsl", 
+													 NULL, 
+													 "shaders/line.frag.glsl", attributeLocations, 1);
+	//glUseProgram(program[PROG_LINE]);
 }
 
 //====================================
@@ -232,8 +239,20 @@ void mainLoop() {
         glUseProgram(program[PROG_PLANET]);
         glBindVertexArray(planetVAO);
         glPointSize(2.0f);
-        glDrawElements(GL_POINTS, N_FOR_VIS + 1, GL_UNSIGNED_INT, 0);
+        glDrawElements(GL_POINTS, N_FOR_VIS, GL_UNSIGNED_INT, 0);
         glPointSize(1.0f);
+
+		//glUseProgram(program[PROG_LINE]);
+		glUseProgram(0);
+
+		glMatrixMode(GL_PROJECTION);
+		glLoadMatrixf(&projection[0][0]);
+		glBegin(GL_LINES);
+		glVertex2f(0.0f, 0.0f);
+		glVertex2f(0.0f, 1.0f);
+		glVertex2f(1.0f, 0.0f);
+		glVertex2f(1.0f, 1.0f);
+		glEnd();
 
         glUseProgram(0);
         glBindVertexArray(0);
