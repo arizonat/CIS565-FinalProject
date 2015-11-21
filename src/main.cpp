@@ -14,7 +14,7 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 2;
+const int N_FOR_VIS = 3;
 const float DT = 0.2f;
 
 glm::vec3* hst_pos;
@@ -108,7 +108,7 @@ bool init(int argc, char **argv) {
 
     cudaGLRegisterBufferObject(planetVBO);
     // Initialize N-body simulation
-    Nbody::initSimulation(N_FOR_VIS);
+    ClearPath::initSimulation(N_FOR_VIS);
 
     projection = glm::perspective(fovy, float(width) / float(height), zNear, zFar);
     //glm::mat4 view = glm::lookAt(cameraPosition, glm::vec3(0), glm::vec3(0, 0, 1));
@@ -191,7 +191,7 @@ void initShaders(GLuint * program) {
 													 "shaders/line.frag.glsl", attributeLocations, 1);
 	//glUseProgram(program[PROG_LINE]);
 
-	hst_endpoints = (glm::vec2*)malloc(6 * (N_FOR_VIS)*sizeof(glm::vec2));
+	hst_endpoints = (glm::vec2*)malloc(6 * (N_FOR_VIS*(N_FOR_VIS-1))*sizeof(glm::vec2));
 }
 
 //====================================
@@ -207,9 +207,9 @@ void runCUDA() {
     cudaGLMapBufferObject((void**)&dptrvert, planetVBO);
 
     // execute the kernel
-    Nbody::stepSimulation(DT);
+    ClearPath::stepSimulation(DT);
 #if VISUALIZE
-    Nbody::copyPlanetsToVBO(dptrvert, hst_endpoints, hst_pos);
+    ClearPath::copyAgentsToVBO(dptrvert, hst_endpoints, hst_pos);
 #endif
     // unmap buffer object
     cudaGLUnmapBufferObject(planetVBO);
@@ -260,9 +260,9 @@ void mainLoop() {
 		glVertex2f(hst_pos[0].x,hst_pos[0].y);
 		glVertex2f(hst_pos[0].x+2, hst_pos[0].y+2);
 
-		for (int i = 0; i < 6*(N_FOR_VIS); i++){
+		for (int i = 0; i < 6*(N_FOR_VIS-1); i++){
 			glVertex2f(hst_endpoints[i].x, hst_endpoints[i].y);
-			printf("%f, %f\n",hst_endpoints[i].x,hst_endpoints[i].y);
+			//printf("%f, %f\n",hst_endpoints[i].x,hst_endpoints[i].y);
 		}
 		glEnd();
         glUseProgram(0);

@@ -12,6 +12,8 @@
 
 #define sign(x) (x>0)-(x<0)
 
+using namespace ClearPath;
+
 /**
  * Check for CUDA errors; print and exit if there was a problem.
  */
@@ -27,37 +29,35 @@ void checkCUDAError(const char *msg, int line = -1) {
 }
 
 
-/*******************
-* Helper classes   *
-********************/
-struct agent{
-	glm::vec3 pos;
-	glm::vec3 vel;
-	glm::vec3 goal;
-	float radius;
-	int id;
-};
+/*****************
+* Configuration *
+*****************/
 
-struct ray{
-	glm::vec3 pos;
-	glm::vec3 dir;
-};
+/*! Block size used for CUDA kernel launch. */
+#define blockSize 128
+#define robot_radius 1
+#define circle_radius 5
 
-struct constraint{
-	glm::vec3 norm;
-	ray ray;
-};
 
-struct segment{
-	glm::vec3 pos1;
-	glm::vec3 pos2;
-};
+/***********************************************
+* Kernel state (pointers are device pointers) *
+***********************************************/
 
-struct FVO{
-	constraint R;
-	constraint L;
-	constraint T;
-};
+int numAgents;
+// TODO: bottom few will need to get removed (# will vary in the loop)
+int numFVOs; // total # of FVOs
+int numNeighbors; // Neighbors per agent
+int numIntersectionPoints;
+
+dim3 threadsPerBlock(blockSize);
+
+float scene_scale = 1.0;
+
+glm::vec2* dev_endpoints;
+glm::vec3* dev_pos;
+agent* dev_agents;
+FVO* dev_fvos;
+int* dev_neighbors; //index of neighbors
 
 /*******************
 * Helper functions *
@@ -174,30 +174,6 @@ __host__ __device__ void computeFVO(agent A, agent B, FVO& fvo_out){
 	//return fvo;
 }
 
-/*****************
- * Configuration *
- *****************/
-
-/*! Block size used for CUDA kernel launch. */
-#define blockSize 128
-
-#define robot_radius 1
-#define circle_radius 5
-
-/***********************************************
- * Kernel state (pointers are device pointers) *
- ***********************************************/
-
-int numAgents;
-dim3 threadsPerBlock(blockSize);
-
-float scene_scale = 1.0;
-
-glm::vec2* dev_endpoints;
-glm::vec3* dev_pos;
-agent* dev_agents;
-FVO* dev_fvos;
-
 /******************
  * initSimulation *
  ******************/
@@ -236,19 +212,10 @@ __global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
 	}
 }
 
-__global__ void kernInitFVOs(int N, FVO* fvos){
-	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
-
-	if (index < N){
-		fvos[index] = FVO();
-	}
-
-}
-
 /**
  * Initialize memory, update some globals
  */
-void Nbody::initSimulation(int N) {
+void ClearPath::initSimulation(int N) {
 	//N = 5;
 	numAgents = N;
     dim3 fullBlocksPerGrid((N + blockSize - 1) / blockSize);
@@ -259,15 +226,12 @@ void Nbody::initSimulation(int N) {
 	cudaMalloc((void**)&dev_agents, N*sizeof(agent));
 	checkCUDAErrorWithLine("cudaMalloc dev_goals failed!");
 
-
 	// TODO: how do do only n-1 endpoints...?
-	cudaMalloc((void**)&dev_endpoints, 6*(N)*sizeof(glm::vec2));
-	checkCUDAErrorWithLine("cudaMalloc dev_endpoints failed!");
+	//cudaMalloc((void**)&dev_endpoints, 6*(N)*sizeof(glm::vec2));
+	//checkCUDAErrorWithLine("cudaMalloc dev_endpoints failed!");
 
-	// TODO: attempt to initialize FVOs on host and then copy to device?
-	cudaMalloc((void**)&dev_fvos, (N)*sizeof(FVO));
-	kernInitFVOs << <fullBlocksPerGrid, blockSize >> >(N, dev_fvos);
-	checkCUDAErrorWithLine("cudaMalloc dev_fvos failed!");
+	//cudaMalloc((void**)&dev_fvos, (N)*sizeof(FVO));
+	//checkCUDAErrorWithLine("cudaMalloc dev_fvos failed!");
 
 	kernInitAgents<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents, scene_scale, robot_radius);
 	checkCUDAErrorWithLine("kernInitAgents failed!");
@@ -314,14 +278,14 @@ __global__ void kernCopyFVOtoEndpoints(int N, glm::vec2* endpoints, FVO* fvos){
 /**
  * Wrapper for call to the kernCopyPlanetsToVBO CUDA kernel.
  */
-void Nbody::copyPlanetsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos) {
+void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos) {
     dim3 fullBlocksPerGrid((int)ceil(float(numAgents) / float(blockSize)));
 
     kernCopyPlanetsToVBO<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_pos, vbodptr, scene_scale);
     checkCUDAErrorWithLine("copyPlanetsToVBO failed!");
 
 	//kernCopyFVOtoEndpoints<<<fullBlocksPerGrid, blockSize>>>(3*(numAgents-1), dev_endpoints);
-	cudaMemcpy(endpoints, dev_endpoints, 6*(numAgents)*sizeof(glm::vec2), cudaMemcpyDeviceToHost);
+	cudaMemcpy(endpoints, dev_endpoints, 6*(numFVOs)*sizeof(glm::vec2), cudaMemcpyDeviceToHost);
 
 	cudaMemcpy(pos, dev_pos, numAgents*sizeof(glm::vec3), cudaMemcpyDeviceToHost);
 
@@ -349,15 +313,35 @@ __global__ void kernUpdateDesVel(int N, agent *dev_agents){
 	}
 }
 
-__global__ void kernComputeFVOs(int N, FVO* fvos, agent* agents, int curr_agent_id){
+__global__ void kernComputeFVOs(int N, FVO* fvos, agent* agents, int* neighbors){
+	// N = number of agents
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
 	if (index < N){
-		if (index == curr_agent_id){
-			fvos[index] = FVO();
+		int numNeighbors = N - 1;
+		for (int i = 0; i < numNeighbors; i++){
+			computeFVO(agents[index], agents[neighbors[i + numNeighbors*index]], fvos[i + numNeighbors*index]);
 		}
-		else {
-			computeFVO(agents[curr_agent_id], agents[index], fvos[index]);
+	}
+}
+
+__global__ void kernComputeNeighbors(int N, int* neighbors, agent* agents){
+	// TODO: limit neighbors based on distance from agents
+	// TODO: track number of neighbors each agent actually has and populate it that way
+	// N - number of agents
+	// row-major collapsed matrix - n agents x n-1 neighbors
+
+	// index is the current agent
+	int index = (blockDim.x * blockIdx.x) + threadIdx.x;
+
+	if (index < N){
+		int numNeighbors = N - 1;
+		// i represents id of the neighbor
+		for (int i = 0; i < index; i++){
+			neighbors[i + index*numNeighbors] = i;
+		}
+		for (int i = index + 1; i < N; i++){
+			neighbors[i-1 + index*numNeighbors] = i;
 		}
 	}
 }
@@ -384,31 +368,72 @@ __global__ void kernUpdatePos(int N, float dt, agent *dev_agents, glm::vec3 *dev
 /**
  * Step the entire N-body simulation by `dt` seconds.
  */
-void Nbody::stepSimulation(float dt) {
+void ClearPath::stepSimulation(float dt) {
 
 	dim3 fullBlocksPerGrid((numAgents + blockSize - 1) / blockSize);
 
-	// Update all the desired velocities
+	// Update all the desired velocities given current positions
 	kernUpdateDesVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents);
+
+	// Allocate space for neighbors, FVOs, intersection points (how to do this?)
+	numNeighbors = numAgents - 1; // number of neighbors PER agent!
+	numFVOs = numNeighbors * numAgents;
+	numIntersectionPoints = numFVOs * numFVOs;
+
+	// Free everything
+	// TODO: Can we make any of these allocations static?
+	cudaFree(dev_neighbors);
+	cudaFree(dev_fvos);
+	cudaFree(dev_endpoints);
+
+	cudaMalloc((void**)&dev_neighbors, numFVOs*sizeof(int));
+	cudaMalloc((void**)&dev_fvos, numFVOs*sizeof(FVO));
+	cudaMalloc((void**)&dev_endpoints, 6*numFVOs*sizeof(glm::vec2));
 
 	// Find neighbors
 	// TODO: starting with all robots are neighbors
 	// TODO: 2 arrays: 1 of all the ones that have same # neighbors, other has the remaining uncomputed ones
+	kernComputeNeighbors<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_neighbors, dev_agents);
 
-	// Allocate FVO buffer based on # neighbors * # robots with that many neighbors
+	int* hst_neighbors = (int*)malloc((numFVOs*numAgents));
+	cudaMemcpy(hst_neighbors, dev_neighbors, numFVOs*sizeof(int), cudaMemcpyDeviceToHost);
+	for (int i = 0; i < numFVOs; i++){
+		printf("%d\t", hst_neighbors[i]);
+	}
+	printf("\n");
+	//free(hst_neighbors);
 
-	kernComputeFVOs<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_fvos, dev_agents, 0);
+	// Compute the FVOs
+	kernComputeFVOs<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_fvos, dev_agents, dev_neighbors);
 
-	FVO* hst_fvos = (FVO*)malloc((numAgents)*sizeof(FVO));
-	cudaMemcpy(hst_fvos, dev_fvos, (numAgents)*sizeof(FVO), cudaMemcpyDeviceToHost);
+	//FVO* hst_fvos = (FVO*)malloc((numFVOs)*sizeof(FVO));
+	//cudaMemcpy(hst_fvos, dev_fvos, (numFVOs)*sizeof(FVO), cudaMemcpyDeviceToHost);
+	//free(hst_fvos);
 
-	free(hst_fvos);
+	kernCopyFVOtoEndpoints<<<fullBlocksPerGrid, blockSize>>>(numFVOs, dev_endpoints, dev_fvos);
 
-	kernCopyFVOtoEndpoints<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_endpoints, dev_fvos);
+	//glm::vec2* hst_endpointss = (glm::vec2*)malloc(numFVOs*6*sizeof(glm::vec2));
+	//cudaMemcpy(hst_endpointss, dev_endpoints, sizeof(glm::vec2)*numFVOs*6, cudaMemcpyDeviceToHost);
+	//for (int i = 0; i < 6 * numFVOs; i++){
+	//	printf("%f, %f\n", hst_endpointss[i].x, hst_endpointss[i].y);
+	//}
+	//printf("---");
+
+	// See if velocity is in PCR, if so, continue, else skip and just update the velocity
+
+	// Compute Intersection Points
+
+	// Compute Inside/Outside Points
+
+	// Sort Intersection Points based on distance from endpoint
+
+	// Compute Inside/Outside Line Segments, track the nearest somehow
 
 	// Update the velocities according to ClearPath
 	kernUpdateVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents);
 
 	// Update the positions
 	kernUpdatePos<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents, dev_pos);
+
+
 }
