@@ -6,7 +6,7 @@
 #include <cmath>
 
 namespace Nbody {
-void initSimulation(int N);
-void stepSimulation(float dt);
-void copyPlanetsToVBO(float *vbodptr);
+	void initSimulation(int N);
+	void stepSimulation(float dt);
+	void copyPlanetsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos);
 }

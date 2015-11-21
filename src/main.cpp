@@ -14,8 +14,10 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 4;
+const int N_FOR_VIS = 2;
 const float DT = 0.2f;
+
+glm::vec3* hst_pos;
 
 /**
  * C main function.
@@ -109,13 +111,16 @@ bool init(int argc, char **argv) {
     Nbody::initSimulation(N_FOR_VIS);
 
     projection = glm::perspective(fovy, float(width) / float(height), zNear, zFar);
-    glm::mat4 view = glm::lookAt(cameraPosition, glm::vec3(0), glm::vec3(0, 0, 1));
+    //glm::mat4 view = glm::lookAt(cameraPosition, glm::vec3(0), glm::vec3(0, 0, 1));
+	glm::mat4 view = glm::lookAt(cameraPosition, glm::vec3(0), glm::vec3(0, 1, 0));
 
     projection = projection * view;
 
     initShaders(program);
 
     glEnable(GL_DEPTH_TEST);
+
+	hst_pos = (glm::vec3*)malloc(N_FOR_VIS*sizeof(glm::vec3));
 
     return true;
 }
@@ -185,6 +190,8 @@ void initShaders(GLuint * program) {
 													 NULL, 
 													 "shaders/line.frag.glsl", attributeLocations, 1);
 	//glUseProgram(program[PROG_LINE]);
+
+	hst_endpoints = (glm::vec2*)malloc(6 * (N_FOR_VIS)*sizeof(glm::vec2));
 }
 
 //====================================
@@ -202,7 +209,7 @@ void runCUDA() {
     // execute the kernel
     Nbody::stepSimulation(DT);
 #if VISUALIZE
-    Nbody::copyPlanetsToVBO(dptrvert);
+    Nbody::copyPlanetsToVBO(dptrvert, hst_endpoints, hst_pos);
 #endif
     // unmap buffer object
     cudaGLUnmapBufferObject(planetVBO);
@@ -247,13 +254,17 @@ void mainLoop() {
 
 		glMatrixMode(GL_PROJECTION);
 		glLoadMatrixf(&projection[0][0]);
-		glBegin(GL_LINES);
-		glVertex2f(0.0f, 0.0f);
-		glVertex2f(0.0f, 1.0f);
-		glVertex2f(1.0f, 0.0f);
-		glVertex2f(1.0f, 1.0f);
-		glEnd();
 
+		glBegin(GL_LINES);
+
+		glVertex2f(hst_pos[0].x,hst_pos[0].y);
+		glVertex2f(hst_pos[0].x+2, hst_pos[0].y+2);
+
+		for (int i = 0; i < 6*(N_FOR_VIS); i++){
+			glVertex2f(hst_endpoints[i].x, hst_endpoints[i].y);
+			printf("%f, %f\n",hst_endpoints[i].x,hst_endpoints[i].y);
+		}
+		glEnd();
         glUseProgram(0);
         glBindVertexArray(0);
 #endif
