@@ -14,10 +14,11 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 3;
-const float DT = 0.2f;
+const int N_FOR_VIS = 2;
+const float DT = 0.1f; //TODO: originally 0.2
 
 glm::vec3* hst_pos;
+ClearPath::agent* hst_agents;
 
 /**
  * C main function.
@@ -121,6 +122,7 @@ bool init(int argc, char **argv) {
     glEnable(GL_DEPTH_TEST);
 
 	hst_pos = (glm::vec3*)malloc(N_FOR_VIS*sizeof(glm::vec3));
+	hst_agents = (ClearPath::agent*)malloc(N_FOR_VIS*sizeof(ClearPath::agent));
 
     return true;
 }
@@ -209,7 +211,7 @@ void runCUDA() {
     // execute the kernel
     ClearPath::stepSimulation(DT);
 #if VISUALIZE
-    ClearPath::copyAgentsToVBO(dptrvert, hst_endpoints, hst_pos);
+    ClearPath::copyAgentsToVBO(dptrvert, hst_endpoints, hst_pos, hst_agents);
 #endif
     // unmap buffer object
     cudaGLUnmapBufferObject(planetVBO);
@@ -264,6 +266,13 @@ void mainLoop() {
 			glVertex2f(hst_endpoints[i].x, hst_endpoints[i].y);
 			//printf("%f, %f\n",hst_endpoints[i].x,hst_endpoints[i].y);
 		}
+
+		glColor3f(1.0,0.0,0.0);
+		for (int i = 0; i < N_FOR_VIS; i++){
+			glVertex2f(hst_agents[i].pos.x, hst_agents[i].pos.y);
+			glVertex2f(hst_agents[i].pos.x+hst_agents[i].vel.x, hst_agents[i].pos.y+hst_agents[i].vel.y);
+		}
+
 		glEnd();
         glUseProgram(0);
         glBindVertexArray(0);

@@ -42,5 +42,5 @@ namespace ClearPath {
 
 	void initSimulation(int N);
 	void stepSimulation(float dt);
-	void copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos);
+	void copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos, agent* agents);
 }

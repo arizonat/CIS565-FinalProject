@@ -35,9 +35,9 @@ void checkCUDAError(const char *msg, int line = -1) {
 
 /*! Block size used for CUDA kernel launch. */
 #define blockSize 128
-#define robot_radius 1
-#define circle_radius 5
-
+#define robot_radius 0.5
+#define circle_radius 10
+#define desired_speed 3.0f
 
 /***********************************************
 * Kernel state (pointers are device pointers) *
@@ -58,6 +58,7 @@ glm::vec3* dev_pos;
 agent* dev_agents;
 FVO* dev_fvos;
 int* dev_neighbors; //index of neighbors
+bool* dev_in_pcr;
 
 /*******************
 * Helper functions *
@@ -124,14 +125,16 @@ __host__ __device__ void computeFVO(agent A, agent B, FVO& fvo_out){
 
 	// Compute pAB perpendicular
 	// TODO: how do I figure out which direction this should be on?
-	glm::vec3 pABp = glm::vec3(0.0);
-	pABp.x = -pAB.y;
-	pABp.y = -pAB.x;
+
+	glm::vec3 pABp = glm::cross(glm::normalize(pAB), glm::vec3(0.0, 0.0, 1.0));
 
 	// Compute FVO_T
 	float sep = glm::length(pAB) - radius;
 	float n = glm::tan(glm::asin(radius / glm::length(pAB)))*sep;
-	glm::vec3 M = sep*glm::normalize(pAB) + ((A.vel+B.vel)/2.0f);
+	glm::vec3 med_vel = (A.vel + B.vel) / 2.0f;
+
+	glm::vec3 M = sep*glm::normalize(pAB) + med_vel;
+	M += A.pos; //TODO: Do I need to multiple the vA + vB/2 by the time step?
 	
 	T.ray.pos = M - glm::normalize(pABp)*n;
 	T.ray.dir = glm::normalize(pABp);
@@ -143,7 +146,7 @@ __host__ __device__ void computeFVO(agent A, agent B, FVO& fvo_out){
 	glm::vec3 apex = A.pos + (A.vel + B.vel) / 2.0f;
 	float theta = glm::asin(radius / glm::length(pAB));
 
-	glm::vec3 rotatedL = glm::rotate(pAB, theta, glm::vec3(0.0,0.0,1.0));
+	glm::vec3 rotatedL = glm::rotateZ(pAB, theta);
 
 	L.ray.pos = T.ray.pos;
 	L.ray.dir = glm::normalize(rotatedL);
@@ -153,7 +156,7 @@ __host__ __device__ void computeFVO(agent A, agent B, FVO& fvo_out){
 	L.norm = glm::normalize(intersectPointRay(pABl, B.pos));
 
 	// Compute FVO_R
-	glm::vec3 rotatedR = glm::rotate(pAB, -theta, glm::vec3(0.0,0.0,1.0));
+	glm::vec3 rotatedR = glm::rotateZ(pAB, -theta);
 
 	R.ray.pos = M + glm::normalize(pABp)*n;
 	R.ray.dir = glm::normalize(rotatedR);
@@ -203,6 +206,11 @@ __global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
 
 	if (index < N){
 		float rad = ((float)index / (float)N) * (2.0f * 3.1415f);
+
+		if (index == 1){
+			rad -= 3.1415f / 2.0f;
+		}
+
 		agents[index].pos.x = scale * circle_radius * cos(rad);
 		agents[index].pos.y = scale * circle_radius * sin(rad);
 		agents[index].pos.z = 0.0;
@@ -225,6 +233,9 @@ void ClearPath::initSimulation(int N) {
 
 	cudaMalloc((void**)&dev_agents, N*sizeof(agent));
 	checkCUDAErrorWithLine("cudaMalloc dev_goals failed!");
+
+	cudaMalloc((void**)&dev_in_pcr, N*sizeof(bool));
+	checkCUDAErrorWithLine("cudaMalloc dev_in_pcr failed!");
 
 	// TODO: how do do only n-1 endpoints...?
 	//cudaMalloc((void**)&dev_endpoints, 6*(N)*sizeof(glm::vec2));
@@ -278,7 +289,7 @@ __global__ void kernCopyFVOtoEndpoints(int N, glm::vec2* endpoints, FVO* fvos){
 /**
  * Wrapper for call to the kernCopyPlanetsToVBO CUDA kernel.
  */
-void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos) {
+void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos, agent* agents) {
     dim3 fullBlocksPerGrid((int)ceil(float(numAgents) / float(blockSize)));
 
     kernCopyPlanetsToVBO<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_pos, vbodptr, scene_scale);
@@ -288,6 +299,7 @@ void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3*
 	cudaMemcpy(endpoints, dev_endpoints, 6*(numFVOs)*sizeof(glm::vec2), cudaMemcpyDeviceToHost);
 
 	cudaMemcpy(pos, dev_pos, numAgents*sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+	cudaMemcpy(agents, dev_agents, numAgents*sizeof(agent), cudaMemcpyDeviceToHost);
 
     cudaThreadSynchronize();
 }
@@ -305,7 +317,7 @@ __global__ void kernUpdateDesVel(int N, agent *dev_agents){
 
 	if (index < N){
 		// Get desired velocity
-		dev_agents[index].vel = glm::normalize(dev_agents[index].goal - dev_agents[index].pos)*0.1f;
+		dev_agents[index].vel = glm::normalize(dev_agents[index].goal - dev_agents[index].pos)*desired_speed;
 		float dist = glm::distance(dev_agents[index].goal, dev_agents[index].pos);
 		if (dist < 0.1){
 			dev_agents[index].vel = glm::vec3(0.0);
@@ -346,12 +358,38 @@ __global__ void kernComputeNeighbors(int N, int* neighbors, agent* agents){
 	}
 }
 
-__global__ void kernUpdateVel(int N, float dt, agent *dev_agents){
-	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+__global__ void kernCheckInPCR(int N, bool* in_pcr, agent* agents, FVO* fvos){
+	// N - number of agents
+	// TODO: increase utilization by putting into for loop and compacting
+	int index = (blockDim.x * blockIdx.x) + threadIdx.x;
 
 	if (index < N){
-		// Get ClearPath adjusted velocity
+		int numNeighbors = N - 1;
+		for (int i = 0; i < numNeighbors; i++){
+			in_pcr[index] = pointInFVO(fvos[index*numNeighbors + i], agents[index].pos + agents[index].vel);
+		}
+	}
 
+}
+
+__global__ void kernUpdateVel(int N, float dt, agent *agents, FVO* fvos, bool* in_pcr){
+	//TODO: can improve this by compacting beforehand?
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	// THIS ONLY WORKS FOR 2 ROBOTS
+
+	if (index < N && in_pcr[index]){
+		glm::vec3 min_vel;
+		glm::vec3 minl = fvos[index].L.ray.pos;
+		glm::vec3 minr = fvos[index].R.ray.pos;
+		if (glm::distance(minl, agents[index].pos + agents[index].vel) < glm::distance(minr, agents[index].pos + agents[index].vel)){
+			min_vel = minl;
+		}
+		else {
+			min_vel = minr;
+		}
+
+		agents[index].vel = minr - agents[index].pos;
 	}
 }
 
@@ -390,36 +428,20 @@ void ClearPath::stepSimulation(float dt) {
 	cudaMalloc((void**)&dev_fvos, numFVOs*sizeof(FVO));
 	cudaMalloc((void**)&dev_endpoints, 6*numFVOs*sizeof(glm::vec2));
 
+	cudaMemset(dev_in_pcr, false, numAgents*sizeof(bool));
+
 	// Find neighbors
 	// TODO: starting with all robots are neighbors
 	// TODO: 2 arrays: 1 of all the ones that have same # neighbors, other has the remaining uncomputed ones
 	kernComputeNeighbors<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_neighbors, dev_agents);
 
-	int* hst_neighbors = (int*)malloc((numFVOs*numAgents));
-	cudaMemcpy(hst_neighbors, dev_neighbors, numFVOs*sizeof(int), cudaMemcpyDeviceToHost);
-	for (int i = 0; i < numFVOs; i++){
-		printf("%d\t", hst_neighbors[i]);
-	}
-	printf("\n");
-	//free(hst_neighbors);
-
 	// Compute the FVOs
 	kernComputeFVOs<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_fvos, dev_agents, dev_neighbors);
 
-	//FVO* hst_fvos = (FVO*)malloc((numFVOs)*sizeof(FVO));
-	//cudaMemcpy(hst_fvos, dev_fvos, (numFVOs)*sizeof(FVO), cudaMemcpyDeviceToHost);
-	//free(hst_fvos);
-
 	kernCopyFVOtoEndpoints<<<fullBlocksPerGrid, blockSize>>>(numFVOs, dev_endpoints, dev_fvos);
 
-	//glm::vec2* hst_endpointss = (glm::vec2*)malloc(numFVOs*6*sizeof(glm::vec2));
-	//cudaMemcpy(hst_endpointss, dev_endpoints, sizeof(glm::vec2)*numFVOs*6, cudaMemcpyDeviceToHost);
-	//for (int i = 0; i < 6 * numFVOs; i++){
-	//	printf("%f, %f\n", hst_endpointss[i].x, hst_endpointss[i].y);
-	//}
-	//printf("---");
-
 	// See if velocity is in PCR, if so, continue, else skip and just update the velocity
+	kernCheckInPCR<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_in_pcr, dev_agents, dev_fvos);
 
 	// Compute Intersection Points
 
@@ -430,7 +452,7 @@ void ClearPath::stepSimulation(float dt) {
 	// Compute Inside/Outside Line Segments, track the nearest somehow
 
 	// Update the velocities according to ClearPath
-	kernUpdateVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents);
+	kernUpdateVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents, dev_fvos, dev_in_pcr);
 
 	// Update the positions
 	kernUpdatePos<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents, dev_pos);
