@@ -87,6 +87,22 @@ __host__ __device__ bool intersectRayRay(ray a, ray b, glm::vec3 &point){
 	return false;
 }
 
+__host__ __device__ glm::vec3 projectPointToLine(glm::vec3 a, glm::vec3 b, glm::vec3 p){
+	// A + dot(AP,AB) / dot(AB,AB) * AB
+	// http://gamedev.stackexchange.com/questions/72528/how-can-i-project-a-3d-point-onto-a-3d-line
+
+	glm::vec3 ap = p - a;
+	glm::vec3 ab = b - a;
+
+	return a + glm::dot(ap, ab) / glm::dot(ab, ab) * ab;
+}
+
+__host__ __device__ glm::vec3 projectPointToRay(ray a, glm::vec3 p){
+	// http://stackoverflow.com/questions/5227373/minimal-perpendicular-vector-between-a-point-and-a-line
+
+	return (a.pos + (glm::normalize(p - a.pos))*a.dir);
+}
+
 __host__ __device__ glm::vec3 intersectPointRay(ray a, glm::vec3 p){
 	// Finds the ray with minimal distance from a point to a ray
 	// http://stackoverflow.com/questions/5227373/minimal-perpendicular-vector-between-a-point-and-a-line
@@ -207,9 +223,9 @@ __global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
 	if (index < N){
 		float rad = ((float)index / (float)N) * (2.0f * 3.1415f);
 
-		if (index == 1){
-			rad -= 3.1415f / 2.0f;
-		}
+		//if (index == 1){
+		//	rad -= 3.1415f / 2.0f;
+		//}
 
 		agents[index].pos.x = scale * circle_radius * cos(rad);
 		agents[index].pos.y = scale * circle_radius * sin(rad);
@@ -379,17 +395,22 @@ __global__ void kernUpdateVel(int N, float dt, agent *agents, FVO* fvos, bool* i
 	// THIS ONLY WORKS FOR 2 ROBOTS
 
 	if (index < N && in_pcr[index]){
+		glm::vec3 des_vel = agents[index].vel;
+
 		glm::vec3 min_vel;
-		glm::vec3 minl = fvos[index].L.ray.pos;
-		glm::vec3 minr = fvos[index].R.ray.pos;
-		if (glm::distance(minl, agents[index].pos + agents[index].vel) < glm::distance(minr, agents[index].pos + agents[index].vel)){
+
+		// TODO: the 10.0f * dir is a hack...figure out how to project onto a ray instead
+		glm::vec3 minl = projectPointToLine(fvos[index].L.ray.pos, fvos[index].L.ray.pos+10.0f*fvos[index].L.ray.dir, agents[index].pos + des_vel) - agents[index].pos;
+		glm::vec3 minr = projectPointToLine(fvos[index].R.ray.pos, fvos[index].R.ray.pos + 10.0f*fvos[index].R.ray.dir, agents[index].pos + des_vel) - agents[index].pos;
+
+		if (glm::distance(minl, des_vel) < glm::distance(minr, des_vel)){
 			min_vel = minl;
 		}
 		else {
 			min_vel = minr;
 		}
 
-		agents[index].vel = minr - agents[index].pos;
+		agents[index].vel = min_vel;
 	}
 }
 

@@ -15,7 +15,7 @@
 #define VISUALIZE 1
 
 const int N_FOR_VIS = 2;
-const float DT = 0.1f; //TODO: originally 0.2
+const float DT = 0.01f; //TODO: originally 0.2
 
 glm::vec3* hst_pos;
 ClearPath::agent* hst_agents;
