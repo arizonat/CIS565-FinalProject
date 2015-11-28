@@ -22,11 +22,14 @@ namespace ClearPath {
 	struct constraint{
 		glm::vec3 norm;
 		ray ray;
+		glm::vec3 endpoint;
+		bool isRay;
 	};
 
 	struct segment{
 		glm::vec3 pos1;
 		glm::vec3 pos2;
+		bool isOutside;
 	};
 
 	struct FVO{
@@ -35,12 +38,14 @@ namespace ClearPath {
 		constraint T;
 	};
 
-	struct intersectionPoint{
+	struct intersection{
 		glm::vec3 point;
+		bool isOutside;
 		bool isIntersection;
+		//float distToRayOrigin;
 	};
 
 	void initSimulation(int N);
 	void stepSimulation(float dt);
-	void copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos, agent* agents);
+	void copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos, agent* agents, intersection* intersections);
 }

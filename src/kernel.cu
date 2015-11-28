@@ -7,6 +7,7 @@
 #include <glm/gtx/rotate_vector.hpp>
 #include "utilityCore.hpp"
 #include "kernel.h"
+#include <vector>
 
 #define checkCUDAErrorWithLine(msg) checkCUDAError(msg, __LINE__)
 
@@ -28,7 +29,6 @@ void checkCUDAError(const char *msg, int line = -1) {
     }
 }
 
-
 /*****************
 * Configuration *
 *****************/
@@ -36,7 +36,7 @@ void checkCUDAError(const char *msg, int line = -1) {
 /*! Block size used for CUDA kernel launch. */
 #define blockSize 128
 #define robot_radius 0.5
-#define circle_radius 10
+#define circle_radius 5
 #define desired_speed 3.0f
 
 /***********************************************
@@ -46,8 +46,13 @@ void checkCUDAError(const char *msg, int line = -1) {
 int numAgents;
 // TODO: bottom few will need to get removed (# will vary in the loop)
 int numFVOs; // total # of FVOs
+int totFVOs;
 int numNeighbors; // Neighbors per agent
-int numIntersectionPoints;
+int totNeighbors;
+int numIntersections; // Nnumber of intersection points per agent
+int totIntersections;
+int numConstraints; // Number of constraints in the Boundary Edge set per agent
+int totConstraints;
 
 dim3 threadsPerBlock(blockSize);
 
@@ -59,6 +64,11 @@ agent* dev_agents;
 FVO* dev_fvos;
 int* dev_neighbors; //index of neighbors
 bool* dev_in_pcr;
+ray* dev_rays;
+constraint* dev_constraints;
+
+glm::vec3* dev_closest_points;
+intersection* dev_intersections;
 
 /*******************
 * Helper functions *
@@ -66,13 +76,16 @@ bool* dev_in_pcr;
 
 // Computes the intersection between 2 rays
 // point is the intersection, bool returns true if there is an intersection, false otherwise
-__host__ __device__ bool intersectRayRay(ray a, ray b, glm::vec3 &point){
+__host__ __device__ intersection intersectRayRay(ray a, ray b){
 	// Solves p1 + t1*v1 = p2 + t2*v2
 	// [t1; t2] = [v1x -v2x; v1y -v2y]^-1*(p2-p1);
+
+	intersection point;
+	point.isIntersection = false;
 	
 	// Parallel lines cannot intersect
 	if (a.dir.x == b.dir.x && a.dir.y == b.dir.y){
-		return false;
+		return point;
 	}
 
 	glm::vec2 ts;
@@ -80,11 +93,66 @@ __host__ __device__ bool intersectRayRay(ray a, ray b, glm::vec3 &point){
 	ts = glm::inverse(glm::mat2(a.dir.x, a.dir.y, -b.dir.x, -b.dir.y)) * glm::vec2(b.pos - a.pos);
 
 	if (ts.x >= 0 && ts.y >= 0){
-		point = glm::vec3(a.pos+a.dir*ts.x);
-		point.z = 0.0;
-		return true;
+		point.point = glm::vec3(a.pos+a.dir*ts.x);
+		point.point.z = 0.0;
+		point.isIntersection = true;
+		return point;
 	}
-	return false;
+	return point;
+}
+
+__host__ __device__ intersection intersectSegmentSegment(glm::vec3 p1, glm::vec3 p2, glm::vec3 p3, glm::vec3 p4){
+	// Re-uses intersectRaySegment, just make the Ray finite length
+
+	ray a;
+	a.pos = p1;
+	a.dir = p2 - p1;
+	float len = glm::length(a.dir);
+	a.dir = glm::normalize(a.dir);
+
+	intersection point;
+	point.isIntersection = false;
+
+	glm::vec3 v1 = a.pos - p3;
+	glm::vec3 v2 = p4 - p3;
+	glm::vec3 v3 = glm::vec3(-a.dir.y, a.dir.x, 0.0);
+
+	float t1 = glm::length(glm::cross(v2, v1)) / glm::dot(v2, v3);
+	float t2 = glm::dot(v1, v3) / glm::dot(v2, v3);
+
+	if (t1 >= 0 && t2 <= len && t2 >= 0 && t2 <= 1)
+	{
+		// Return the point of intersection
+		point.point = a.pos + t1 * a.dir;
+		point.isIntersection = true;
+	}
+
+	return point;
+}
+
+__host__ __device__ intersection intersectRaySegment(ray a, glm::vec3 p1, glm::vec3 p2){
+	// http://stackoverflow.com/questions/14307158/how-do-you-check-for-intersection-between-a-line-segment-and-a-line-ray-emanatin
+	// http://gamedev.stackexchange.com/questions/85850/collision-intersection-of-2d-ray-to-line-segment
+	// https://rootllama.wordpress.com/2014/06/20/ray-line-segment-intersection-test-in-2d/
+
+	intersection point;
+	point.isIntersection = false;
+
+	glm::vec3 v1 = a.pos - p1;
+	glm::vec3 v2 = p2 - p1;
+	glm::vec3 v3 = glm::vec3(-a.dir.y, a.dir.x, 0.0);
+
+	float t1 = glm::length(glm::cross(v2,v1))/glm::dot(v2,v3);
+	float t2 = glm::dot(v1, v3) / glm::dot(v2, v3);
+
+	if (t1 >= 0 && t2 >= 0 && t2 <= 1)
+	{
+		// Return the point of intersection
+		point.point = a.pos + t1 * a.dir;
+		point.isIntersection = true;
+	}
+
+	return point;
 }
 
 __host__ __device__ glm::vec3 projectPointToLine(glm::vec3 a, glm::vec3 b, glm::vec3 p){
@@ -132,7 +200,21 @@ __host__ __device__ bool pointInFVO(FVO fvo, glm::vec3 p){
 	return (fvol_sat < 0) && (fvor_sat > 0) && (fvot_sat > 0);
 }
 
-__host__ __device__ void computeFVO(agent A, agent B, FVO& fvo_out){
+__host__ __device__ void intersectFVOtoFVO(FVO a, FVO b, intersection* points){
+	points[0] = intersectRayRay(a.L.ray, b.L.ray);
+	points[1] = intersectRaySegment(a.L.ray, b.L.ray.pos, b.R.ray.pos);
+	points[2] = intersectRayRay(a.L.ray, b.R.ray);
+	
+	points[3] = intersectRaySegment(b.L.ray, a.L.ray.pos, a.R.ray.pos);
+	points[4] = intersectSegmentSegment(a.L.ray.pos, a.R.ray.pos, b.L.ray.pos, b.R.ray.pos);
+	points[5] = intersectRaySegment(b.R.ray, a.L.ray.pos, a.R.ray.pos);
+	
+	points[6] = intersectRayRay(a.R.ray, b.L.ray);
+	points[7] = intersectRaySegment(a.R.ray, b.L.ray.pos, b.R.ray.pos);
+	points[8] = intersectRayRay(a.R.ray, b.R.ray);
+}
+
+__host__ __device__ FVO computeFVO(agent A, agent B){
 	glm::vec3 pAB = B.pos - A.pos;
 	float radius = A.radius + B.radius;
 
@@ -155,8 +237,6 @@ __host__ __device__ void computeFVO(agent A, agent B, FVO& fvo_out){
 	T.ray.pos = M - glm::normalize(pABp)*n;
 	T.ray.dir = glm::normalize(pABp);
 	T.norm = glm::normalize(pAB);
-
-	fvo.T = T;
 
 	// Compute FVO_L
 	glm::vec3 apex = A.pos + (A.vel + B.vel) / 2.0f;
@@ -181,16 +261,16 @@ __host__ __device__ void computeFVO(agent A, agent B, FVO& fvo_out){
 	pABr.dir = R.ray.dir;
 	R.norm = glm::normalize(intersectPointRay(pABr, B.pos));
 
+	L.isRay = true;
+	T.endpoint = R.ray.pos;
+	T.isRay = false;
+	R.isRay = true;
+
 	fvo.T = T;
 	fvo.L = L;
 	fvo.R = R;
 
-	fvo_out.T = T;
-	fvo_out.L = L;
-	fvo_out.R = R;
-
-	//fvo_out = fvo;
-	//return fvo;
+	return fvo;
 }
 
 /******************
@@ -253,13 +333,6 @@ void ClearPath::initSimulation(int N) {
 	cudaMalloc((void**)&dev_in_pcr, N*sizeof(bool));
 	checkCUDAErrorWithLine("cudaMalloc dev_in_pcr failed!");
 
-	// TODO: how do do only n-1 endpoints...?
-	//cudaMalloc((void**)&dev_endpoints, 6*(N)*sizeof(glm::vec2));
-	//checkCUDAErrorWithLine("cudaMalloc dev_endpoints failed!");
-
-	//cudaMalloc((void**)&dev_fvos, (N)*sizeof(FVO));
-	//checkCUDAErrorWithLine("cudaMalloc dev_fvos failed!");
-
 	kernInitAgents<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents, scene_scale, robot_radius);
 	checkCUDAErrorWithLine("kernInitAgents failed!");
 
@@ -267,11 +340,11 @@ void ClearPath::initSimulation(int N) {
 }
 
 /******************
- * copyPlanetsToVBO *
+ * copyAgentsToVBO *
  ******************/
 
 /**
- * Copy the planet positions into the VBO so that they can be drawn by OpenGL.
+ * Copy the agent positions into the VBO so that they can be drawn by OpenGL.
  */
 __global__ void kernCopyPlanetsToVBO(int N, glm::vec3 *pos, float *vbo, float s_scale) {
     int index = threadIdx.x + (blockIdx.x * blockDim.x);
@@ -305,7 +378,7 @@ __global__ void kernCopyFVOtoEndpoints(int N, glm::vec2* endpoints, FVO* fvos){
 /**
  * Wrapper for call to the kernCopyPlanetsToVBO CUDA kernel.
  */
-void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos, agent* agents) {
+void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos, agent* agents, intersection* intersections) {
     dim3 fullBlocksPerGrid((int)ceil(float(numAgents) / float(blockSize)));
 
     kernCopyPlanetsToVBO<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_pos, vbodptr, scene_scale);
@@ -316,6 +389,7 @@ void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3*
 
 	cudaMemcpy(pos, dev_pos, numAgents*sizeof(glm::vec3), cudaMemcpyDeviceToHost);
 	cudaMemcpy(agents, dev_agents, numAgents*sizeof(agent), cudaMemcpyDeviceToHost);
+	cudaMemcpy(intersections, dev_intersections, totIntersections*sizeof(intersection), cudaMemcpyDeviceToHost);
 
     cudaThreadSynchronize();
 }
@@ -323,10 +397,6 @@ void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3*
 /******************
  * stepSimulation *
  ******************/
-
-__device__ glm::vec3 clearPathVelocity(){
-	return glm::vec3();
-}
 
 __global__ void kernUpdateDesVel(int N, agent *dev_agents){
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -341,14 +411,14 @@ __global__ void kernUpdateDesVel(int N, agent *dev_agents){
 	}
 }
 
-__global__ void kernComputeFVOs(int N, FVO* fvos, agent* agents, int* neighbors){
+__global__ void kernComputeFVOs(int N, int numNeighbors, FVO* fvos, agent* agents, int* neighbors){
 	// N = number of agents
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
 	if (index < N){
-		int numNeighbors = N - 1;
+		//int numNeighbors = N - 1;
 		for (int i = 0; i < numNeighbors; i++){
-			computeFVO(agents[index], agents[neighbors[i + numNeighbors*index]], fvos[i + numNeighbors*index]);
+			fvos[i + numNeighbors*index] = computeFVO(agents[index], agents[neighbors[i + numNeighbors*index]]);
 		}
 	}
 }
@@ -374,13 +444,13 @@ __global__ void kernComputeNeighbors(int N, int* neighbors, agent* agents){
 	}
 }
 
-__global__ void kernCheckInPCR(int N, bool* in_pcr, agent* agents, FVO* fvos){
+__global__ void kernCheckInPCR(int N, int numNeighbors, bool* in_pcr, agent* agents, FVO* fvos){
 	// N - number of agents
 	// TODO: increase utilization by putting into for loop and compacting
 	int index = (blockDim.x * blockIdx.x) + threadIdx.x;
 
 	if (index < N){
-		int numNeighbors = N - 1;
+		//int numNeighbors = N - 1;
 		for (int i = 0; i < numNeighbors; i++){
 			in_pcr[index] = pointInFVO(fvos[index*numNeighbors + i], agents[index].pos + agents[index].vel);
 		}
@@ -388,7 +458,33 @@ __global__ void kernCheckInPCR(int N, bool* in_pcr, agent* agents, FVO* fvos){
 
 }
 
-__global__ void kernUpdateVel(int N, float dt, agent *agents, FVO* fvos, bool* in_pcr){
+__global__ void kernUpdateVelBad(int N, float dt, agent *agents, FVO* fvos, bool* in_pcr){
+	//TODO: can improve this by compacting beforehand?
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	// THIS ONLY WORKS FOR 2 ROBOTS
+
+	if (index < N && in_pcr[index]){
+		glm::vec3 des_vel = agents[index].vel;
+
+		glm::vec3 min_vel;
+
+		// TODO: the 10.0f * dir is a hack...figure out how to project onto a ray instead
+		glm::vec3 minl = fvos[index].L.ray.pos;
+		glm::vec3 minr = fvos[index].R.ray.pos;
+			
+		if (glm::distance(minl, agents[index].pos+des_vel) < glm::distance(minr, agents[index].pos + des_vel)){
+			min_vel = minl;
+		}
+		else {
+			min_vel = minr;
+		}
+
+		agents[index].vel = min_vel-agents[index].pos;
+	}
+}
+
+__global__ void kernUpdateVel2Only(int N, float dt, agent *agents, FVO* fvos, bool* in_pcr){
 	//TODO: can improve this by compacting beforehand?
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
@@ -402,9 +498,13 @@ __global__ void kernUpdateVel(int N, float dt, agent *agents, FVO* fvos, bool* i
 		// TODO: the 10.0f * dir is a hack...figure out how to project onto a ray instead
 		glm::vec3 minl = projectPointToLine(fvos[index].L.ray.pos, fvos[index].L.ray.pos+10.0f*fvos[index].L.ray.dir, agents[index].pos + des_vel) - agents[index].pos;
 		glm::vec3 minr = projectPointToLine(fvos[index].R.ray.pos, fvos[index].R.ray.pos + 10.0f*fvos[index].R.ray.dir, agents[index].pos + des_vel) - agents[index].pos;
+		glm::vec3 mint = projectPointToLine(fvos[index].L.ray.pos, fvos[index].R.ray.pos, agents[index].pos + des_vel) - agents[index].pos;
 
-		if (glm::distance(minl, des_vel) < glm::distance(minr, des_vel)){
+		if (glm::distance(minl, des_vel) < glm::distance(minr, des_vel) && glm::distance(minl, des_vel) < glm::distance(mint, des_vel)){
 			min_vel = minl;
+		}
+		else if (glm::distance(mint, des_vel) < glm::distance(minr, des_vel) && glm::distance(mint, des_vel) < glm::distance(mint, des_vel)){
+			min_vel = mint;
 		}
 		else {
 			min_vel = minr;
@@ -414,7 +514,70 @@ __global__ void kernUpdateVel(int N, float dt, agent *agents, FVO* fvos, bool* i
 	}
 }
 
-__global__ void kernUpdatePos(int N, float dt, agent *dev_agents, glm::vec3 *dev_pos){
+__global__ void kernConvertFVOsToConstraints(int numFVOs, int numAgents, int numNeighbors, constraint* constraints, FVO* fvos){
+	//N is the number of FVOs
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	if (index < numFVOs){
+		int row_FVO = index / numNeighbors;
+		int col_FVO = index % numNeighbors;
+		int numConstraints = numNeighbors * 3;
+
+		constraints[numConstraints*row_FVO + 3 * col_FVO] = fvos[index].L;
+		constraints[numConstraints*row_FVO + 3 * col_FVO + 1] = fvos[index].T;
+		constraints[numConstraints*row_FVO + 3 * col_FVO + 2] = fvos[index].R;
+	}
+}
+
+__global__ void kernFindIntersections(int totConstraints, int numAgents, int numConstraints, int numIntersections, intersection* intersections, const constraint* constraints){
+	// totFVO is the number of constraints
+	// Parallelizes over the constraints
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	if (index < totConstraints){
+		// Get current FVO
+		int cr = index / numConstraints;
+		int cc = index % numConstraints;
+
+		intersection point;
+		constraint c = constraints[index];
+		constraint oc;
+
+		// Iterate through all the other FVOs
+		int j = 0;
+
+		// %3 in order to skip comparing an FVO with itself
+		for (int i = 0; i < cc-(cc%3); i++){
+			oc = constraints[i + cr*numConstraints];
+			point = intersectRayRay(c.ray,oc.ray);
+			
+			point.isIntersection = point.isIntersection && (
+								   (c.isRay && oc.isRay) ||
+								   (c.isRay && !oc.isRay && glm::distance(oc.ray.pos,point.point) <= glm::distance(oc.ray.pos, oc.endpoint)) ||
+								   (!c.isRay && oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint)) ||
+								   (!c.isRay && !oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint) && glm::distance(oc.ray.pos, point.point) <= glm::distance(oc.ray.pos, oc.endpoint)));
+
+			intersections[i*numConstraints + j + cr*numIntersections] = point;
+			j++;
+		}
+
+		for (int i = cc + (3-cc%3); i < numConstraints; i++){
+			oc = constraints[i + cr*numConstraints];
+			point = intersectRayRay(c.ray, oc.ray);
+			
+			point.isIntersection = point.isIntersection && (
+				(c.isRay && oc.isRay) ||
+				(c.isRay && !oc.isRay && glm::distance(oc.ray.pos, point.point) <= glm::distance(oc.ray.pos, oc.endpoint)) ||
+				(!c.isRay && oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint)) ||
+				(!c.isRay && !oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint) && glm::distance(oc.ray.pos, point.point) <= glm::distance(oc.ray.pos, oc.endpoint)));
+
+			intersections[i*numConstraints + j + cr*numIntersections] = point;
+			j++;
+		}
+	}
+}
+
+__global__ void kernUpdatePos(int N, float dt, agent* dev_agents, glm::vec3 *dev_pos){
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
 	if (index < N){
@@ -435,36 +598,60 @@ void ClearPath::stepSimulation(float dt) {
 	kernUpdateDesVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents);
 
 	// Allocate space for neighbors, FVOs, intersection points (how to do this?)
-	numNeighbors = numAgents - 1; // number of neighbors PER agent!
-	numFVOs = numNeighbors * numAgents;
-	numIntersectionPoints = numFVOs * numFVOs;
+	numNeighbors = numAgents - 1;
+	numFVOs = numNeighbors;
+	numConstraints = numFVOs * 3;
+	numIntersections = numConstraints * (numConstraints - 3); //-3 to remove constraints from the same FVO
+	
+	totNeighbors = numNeighbors * numAgents;
+	totFVOs = numFVOs * numAgents;
+	totConstraints = numConstraints * numAgents;
+	totIntersections = numIntersections * numAgents;
+
+	// Get the number of blocks we need
+	dim3 fullBlocksForFVOs((totFVOs + blockSize - 1) / blockSize);
 
 	// Free everything
-	// TODO: Can we make any of these allocations static?
 	cudaFree(dev_neighbors);
 	cudaFree(dev_fvos);
 	cudaFree(dev_endpoints);
+	cudaFree(dev_intersections);
+	cudaFree(dev_constraints);
 
-	cudaMalloc((void**)&dev_neighbors, numFVOs*sizeof(int));
-	cudaMalloc((void**)&dev_fvos, numFVOs*sizeof(FVO));
-	cudaMalloc((void**)&dev_endpoints, 6*numFVOs*sizeof(glm::vec2));
+	cudaMalloc((void**)&dev_neighbors, totFVOs*sizeof(int));
+	cudaMalloc((void**)&dev_fvos, totFVOs*sizeof(FVO));
+	cudaMalloc((void**)&dev_endpoints, 6*totFVOs*sizeof(glm::vec2));
+	cudaMalloc((void**)&dev_constraints, totConstraints*sizeof(constraint));
+	cudaMalloc((void**)&dev_intersections, totIntersections*sizeof(intersection));
 
 	cudaMemset(dev_in_pcr, false, numAgents*sizeof(bool));
 
 	// Find neighbors
-	// TODO: starting with all robots are neighbors
 	// TODO: 2 arrays: 1 of all the ones that have same # neighbors, other has the remaining uncomputed ones
 	kernComputeNeighbors<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_neighbors, dev_agents);
 
 	// Compute the FVOs
-	kernComputeFVOs<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_fvos, dev_agents, dev_neighbors);
+	kernComputeFVOs<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_fvos, dev_agents, dev_neighbors);
 
 	kernCopyFVOtoEndpoints<<<fullBlocksPerGrid, blockSize>>>(numFVOs, dev_endpoints, dev_fvos);
 
 	// See if velocity is in PCR, if so, continue, else skip and just update the velocity
-	kernCheckInPCR<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_in_pcr, dev_agents, dev_fvos);
+	kernCheckInPCR<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_in_pcr, dev_agents, dev_fvos);
+
+	// Gather each constraint so we can easily track intersections
+	kernConvertFVOsToConstraints<<<fullBlocksForFVOs, blockSize>>>(totFVOs, numAgents, numNeighbors, dev_constraints, dev_fvos);
+
+	// Compute all the intersection points
+	kernFindIntersections<<<fullBlocksForFVOs, blockSize>>>(totConstraints, numAgents, numConstraints, numIntersections, dev_intersections, dev_constraints);
+
+	intersection* hst_intersection = (intersection*)malloc(totIntersections*sizeof(intersection));
+	cudaMemcpy(hst_intersection, dev_intersections, totIntersections*sizeof(intersection), cudaMemcpyDeviceToHost);
 
 	// Compute Intersection Points
+	//kernComputeintersections<<<fullBlocksPerGrid, blockSize>>>();
+	//for (int i = 0; i < numNeighbors; i++){
+	//	kernFindIntersections<<<fullBlocksPerGrid, blockSize>>>(numAgents, true, i, dev_intersections, dev_agents, dev_fvos);
+	//}
 
 	// Compute Inside/Outside Points
 
@@ -473,7 +660,8 @@ void ClearPath::stepSimulation(float dt) {
 	// Compute Inside/Outside Line Segments, track the nearest somehow
 
 	// Update the velocities according to ClearPath
-	kernUpdateVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents, dev_fvos, dev_in_pcr);
+	//kernUpdateVel2Only<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents, dev_fvos, dev_in_pcr);
+	//kernUpdateVelBad << <fullBlocksPerGrid, blockSize >> >(numAgents, dt, dev_agents, dev_fvos, dev_in_pcr);
 
 	// Update the positions
 	kernUpdatePos<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents, dev_pos);

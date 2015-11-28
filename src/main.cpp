@@ -14,10 +14,12 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 2;
-const float DT = 0.01f; //TODO: originally 0.2
+const int N_FOR_VIS = 3;
+const float DT = 0.001f; //TODO: originally 0.2
 
 glm::vec3* hst_pos;
+ClearPath::intersection* hst_intersections;
+ClearPath::segment* hst_segments;
 ClearPath::agent* hst_agents;
 
 /**
@@ -123,6 +125,8 @@ bool init(int argc, char **argv) {
 
 	hst_pos = (glm::vec3*)malloc(N_FOR_VIS*sizeof(glm::vec3));
 	hst_agents = (ClearPath::agent*)malloc(N_FOR_VIS*sizeof(ClearPath::agent));
+	//TODO: this should NOT be hardcoded!!!
+	hst_intersections = (ClearPath::intersection*)malloc(90*sizeof(ClearPath::intersection));
 
     return true;
 }
@@ -211,7 +215,7 @@ void runCUDA() {
     // execute the kernel
     ClearPath::stepSimulation(DT);
 #if VISUALIZE
-    ClearPath::copyAgentsToVBO(dptrvert, hst_endpoints, hst_pos, hst_agents);
+    ClearPath::copyAgentsToVBO(dptrvert, hst_endpoints, hst_pos, hst_agents, hst_intersections);
 #endif
     // unmap buffer object
     cudaGLUnmapBufferObject(planetVBO);
@@ -258,21 +262,32 @@ void mainLoop() {
 		glLoadMatrixf(&projection[0][0]);
 
 		glBegin(GL_LINES);
+		glColor3f(1.0, 0.0, 0.0);
 
+		// Mark robot of focus
 		glVertex2f(hst_pos[0].x,hst_pos[0].y);
 		glVertex2f(hst_pos[0].x+2, hst_pos[0].y+2);
-
+		
+		// Draw FVOs
 		for (int i = 0; i < 6*(N_FOR_VIS-1); i++){
 			glVertex2f(hst_endpoints[i].x, hst_endpoints[i].y);
 			//printf("%f, %f\n",hst_endpoints[i].x,hst_endpoints[i].y);
 		}
 
-		glColor3f(1.0,0.0,0.0);
+		// Draw velocity vectors
 		for (int i = 0; i < N_FOR_VIS; i++){
 			glVertex2f(hst_agents[i].pos.x, hst_agents[i].pos.y);
 			glVertex2f(hst_agents[i].pos.x+hst_agents[i].vel.x, hst_agents[i].pos.y+hst_agents[i].vel.y);
 		}
 
+		// Draw intersection points
+		glColor3f(0.0,1.0,0.0);
+		for (int i = 0; i < 30; i++){
+			if (hst_intersections[i].isIntersection){
+				glVertex2f(hst_intersections[i].point.x, hst_intersections[i].point.y);
+				glVertex2f(hst_intersections[i].point.x+1.0f, hst_intersections[i].point.y+1.0f);
+			}
+		}
 		glEnd();
         glUseProgram(0);
         glBindVertexArray(0);
