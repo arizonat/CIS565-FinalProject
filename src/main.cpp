@@ -14,8 +14,8 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 3;
-const float DT = 0.001f; //TODO: originally 0.2
+const int N_FOR_VIS = 4;
+const float DT = 0.01f; //TODO: originally 0.2
 
 glm::vec3* hst_pos;
 ClearPath::intersection* hst_intersections;

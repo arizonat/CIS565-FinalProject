@@ -39,10 +39,10 @@ void checkCUDAError(const char *msg, int line = -1) {
 /*! Block size used for CUDA kernel launch. */
 #define blockSize 128
 #define robot_radius 0.5
-#define circle_radius 5
+#define circle_radius 4
 #define desired_speed 3.0f
 
-#define GRIDMAX 10 // Must be even, creates grid of GRIDMAX x GRIDMAX size
+#define GRIDMAX 20 // Must be even, creates grid of GRIDMAX x GRIDMAX size
 #define NNRADIUS 2.0f
 
 /***********************************************
@@ -73,6 +73,10 @@ bool* dev_in_pcr;
 ray* dev_rays;
 constraint* dev_constraints;
 UGEntry* dev_uglist;
+int* dev_startIdx;
+
+int* dev_ug_neighbors;
+int* dev_num_neighbors;
 
 glm::vec3* dev_closest_points;
 intersection* dev_intersections;
@@ -355,6 +359,20 @@ __global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
 		agents[index].pos.x = scale * circle_radius * cos(rad);
 		agents[index].pos.y = scale * circle_radius * sin(rad);
 		agents[index].pos.z = 0.0;
+
+		if (index == 0){
+			agents[index].pos = glm::vec3(1.0,1.0,0.0);
+		}
+		else if (index == 1){
+			agents[index].pos = glm::vec3(1.0, 1.0, 0.0);
+		}
+		else if (index == 2){
+			agents[index].pos = glm::vec3(1.0, 1.0, 0.0);
+		}
+		else if (index == 3){
+			agents[index].pos = glm::vec3(-2.0, 2.0, 0.0);
+		}
+
 		agents[index].goal = -agents[index].pos;
 		agents[index].radius = radius;
 		agents[index].id = index;
@@ -664,6 +682,75 @@ __global__ void kernUpdatePos(int N, float dt, agent* dev_agents, glm::vec3 *dev
 	}
 }
 
+__global__ void kernInitStartIdxes(int numIdx, int* startIdx){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+	
+	if (index < numIdx){
+		startIdx[index] = -1;
+	}
+}
+
+__global__ void kernComputeUGNeighbors(int numAgents, int max_num_neighbors, int* neighbors, int* max_neighbors, agent* agents, int* startIdx, UGEntry* ug_list){
+	// numAgents - number of agents
+	// max_num_neighbors - usually numAgents - 1, but the max number of neighbors we are considering
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	if (index < numAgents){
+		Cell cell = getGridCell(NNRADIUS, agents[index]);
+		int dxs[9] = { -1, 0, 1, -1, 0, 1, -1, 0, 1 };
+		int dys[9] = { -1, -1, -1, 0, 0, 0, 1, 1, 1 };
+
+		int max_n = 0;
+
+		Cell ncell;
+		for (int i = 0; i < 9; i++){
+			int dx = dxs[i];
+			int dy = dys[i];
+
+			if (dx < 0 || dy < 0 || dx >= GRIDMAX || dy >= GRIDMAX){
+				continue;
+			}
+			ncell.x = cell.x + dx;
+			ncell.y = cell.y + dy;
+			int ncellId = getIdFromCell(ncell);
+
+			int start = startIdx[ncellId];
+			if (start < 0) continue; // No agents in this cell
+
+			for (int j = start; j < numAgents; j++){
+				int oagentId = ug_list[j].agentId;
+				if (oagentId == index) continue; // Skip if it's myself
+				if (ug_list[j].cellId != ncellId) break; // Hit the end of these
+				
+				if (glm::distance(agents[oagentId].pos, agents[index].pos) < NNRADIUS){
+					neighbors[index*max_num_neighbors + max_n] = oagentId;
+					max_n++;
+				}
+			}
+		}
+		max_neighbors[index] = max_n;
+	}
+}
+
+__global__ void kernUGStartIdxes(int numAgents, int* startIdx, UGEntry* ug_list){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	if (index < numAgents){
+		int idx = ug_list[index].cellId;
+
+		if (index == 0){
+			startIdx[idx] = index;
+		}
+		else {
+			int idx_prev = ug_list[index - 1].cellId;
+			// Note: Race condition happens if we do not block off other threads from writing to here
+			if (idx_prev != idx){
+				startIdx[idx] = index;
+			}
+		}
+	}
+}
+
 
 /**
  * Step the entire N-body simulation by `dt` seconds.
@@ -688,6 +775,7 @@ void ClearPath::stepSimulation(float dt) {
 
 	// Get the number of blocks we need
 	dim3 fullBlocksForFVOs((totFVOs + blockSize - 1) / blockSize);
+	dim3 fullBlocksForUG((GRIDMAX*GRIDMAX + blockSize - 1) / blockSize);
 
 	// Free everything
 	cudaFree(dev_neighbors);
@@ -696,6 +784,9 @@ void ClearPath::stepSimulation(float dt) {
 	cudaFree(dev_intersections);
 	cudaFree(dev_constraints);
 	cudaFree(dev_uglist);
+	cudaFree(dev_startIdx);
+	cudaFree(dev_ug_neighbors);
+	cudaFree(dev_num_neighbors);
 
 	cudaMalloc((void**)&dev_neighbors, totFVOs*sizeof(int));
 	cudaMalloc((void**)&dev_fvos, totFVOs*sizeof(FVO));
@@ -703,14 +794,18 @@ void ClearPath::stepSimulation(float dt) {
 	cudaMalloc((void**)&dev_constraints, totConstraints*sizeof(constraint));
 	cudaMalloc((void**)&dev_intersections, totIntersections*sizeof(intersection));
 	cudaMalloc((void**)&dev_uglist, numAgents*sizeof(UGEntry));
+	cudaMalloc((void**)&dev_startIdx, GRIDMAX*GRIDMAX*sizeof(int));
+	cudaMalloc((void**)&dev_ug_neighbors, numNeighbors*numAgents*sizeof(int));
+	cudaMalloc((void**)&dev_num_neighbors, numAgents*sizeof(int));
 
+	// TODO: this should actually be a kernel initialization
 	cudaMemset(dev_in_pcr, false, numAgents*sizeof(bool));
 	cudaThreadSynchronize();
 
 	// Find neighbors
 	// TODO: 2 arrays: 1 of all the ones that have same # neighbors, other has the remaining uncomputed ones
 	kernComputeNeighbors<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_neighbors, dev_agents);
-	//cudaThreadSynchronize();
+	cudaThreadSynchronize();
 
 	// Compute Neighbors with the Uniform Grid
 	kernUpdateUniformGrid<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_uglist, dev_agents);
@@ -720,19 +815,43 @@ void ClearPath::stepSimulation(float dt) {
 	thrust::device_ptr<UGEntry> thrust_uglist = thrust::device_pointer_cast(dev_uglist);
 	thrust::sort(thrust_uglist, thrust_uglist+numAgents, UGComp());
 
-
+	// Create start index structure
+	kernInitStartIdxes<<<fullBlocksForUG, blockSize>>>(GRIDMAX*GRIDMAX, dev_startIdx);
+	kernUGStartIdxes<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_startIdx, dev_uglist);
+	
+	/*
 	UGEntry* hst_uglist = (UGEntry*)malloc(numAgents * sizeof(UGEntry));
-	cudaMemcpy(hst_uglist, dev_uglist, numAgents*sizeof(UGEntry),cudaMemcpyDeviceToHost);
+	cudaMemcpy(hst_uglist, dev_uglist, numAgents*sizeof(UGEntry), cudaMemcpyDeviceToHost);
 	for (int i = 0; i < numAgents; i++){
 		printf("(cell %d, agent %d)\n", hst_uglist[i].cellId, hst_uglist[i].agentId);
 	}
-	free(hst_uglist);
-	// Get the neighbors
 
+	printf("-----\n");
+	int* hst_startIdx = (int*)malloc(GRIDMAX*GRIDMAX*sizeof(int));
+	cudaMemcpy(hst_startIdx, dev_startIdx, GRIDMAX*GRIDMAX*sizeof(int), cudaMemcpyDeviceToHost);
+	for (int i = 0; i < GRIDMAX*GRIDMAX; i++){
+		if (hst_startIdx[i] >= 0){
+			printf("cell: %d, start: %d\n", i, hst_startIdx[i]);
+		}
+	}
+
+	free(hst_uglist);
+	free(hst_startIdx);
+	*/
+
+	// Get the neighbors
+	kernComputeUGNeighbors<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_ug_neighbors, dev_num_neighbors, dev_agents, dev_startIdx, dev_uglist);
+
+	int* hst_ug_neighbors = (int*)malloc(numAgents*numNeighbors*sizeof(int));
+	int* hst_num_neighbors = (int*)malloc(numAgents*sizeof(int));
+
+	cudaMemcpy(hst_ug_neighbors, dev_ug_neighbors, numAgents*numNeighbors*sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(hst_num_neighbors, dev_num_neighbors, numAgents*sizeof(int), cudaMemcpyDeviceToHost);
 
 	// Compute the FVOs
 	kernComputeFVOs<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_fvos, dev_agents, dev_neighbors);
 
+	//TODO: change FullBlocksPerGrid here to fullblockforfvo?
 	kernCopyFVOtoEndpoints<<<fullBlocksPerGrid, blockSize>>>(numFVOs, dev_endpoints, dev_fvos);
 
 	// See if velocity is in PCR, if so, continue, else skip and just update the velocity
