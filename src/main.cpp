@@ -14,13 +14,15 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 4;
-const float DT = 0.01f; //TODO: originally 0.2
+const int N_FOR_VIS = 10;
+const float DT = 0.005f; //TODO: originally 0.2
 
 glm::vec3* hst_pos;
 ClearPath::intersection* hst_intersections;
 ClearPath::segment* hst_segments;
 ClearPath::agent* hst_agents;
+int* hst_neighbors;
+int* hst_num_neighbors;
 
 /**
  * C main function.
@@ -126,7 +128,9 @@ bool init(int argc, char **argv) {
 	hst_pos = (glm::vec3*)malloc(N_FOR_VIS*sizeof(glm::vec3));
 	hst_agents = (ClearPath::agent*)malloc(N_FOR_VIS*sizeof(ClearPath::agent));
 	//TODO: this should NOT be hardcoded!!!
-	hst_intersections = (ClearPath::intersection*)malloc(90*sizeof(ClearPath::intersection));
+	//hst_intersections = (ClearPath::intersection*)malloc(90*sizeof(ClearPath::intersection));
+	hst_neighbors = (int*)malloc(N_FOR_VIS*(N_FOR_VIS-1)*sizeof(int));
+	hst_num_neighbors = (int*)malloc(N_FOR_VIS*sizeof(int));
 
     return true;
 }
@@ -215,7 +219,7 @@ void runCUDA() {
     // execute the kernel
     ClearPath::stepSimulation(DT);
 #if VISUALIZE
-    ClearPath::copyAgentsToVBO(dptrvert, hst_endpoints, hst_pos, hst_agents, hst_intersections);
+    ClearPath::copyAgentsToVBO(dptrvert, hst_endpoints, hst_pos, hst_agents, hst_intersections, hst_neighbors, hst_num_neighbors);
 #endif
     // unmap buffer object
     cudaGLUnmapBufferObject(planetVBO);
@@ -280,7 +284,17 @@ void mainLoop() {
 			glVertex2f(hst_agents[i].pos.x+hst_agents[i].vel.x, hst_agents[i].pos.y+hst_agents[i].vel.y);
 		}
 
+		// Draw neighbors for the first robot
+		glColor3f(0.0, 1.0, 0.0);
+		for (int i = 0; i < hst_num_neighbors[0]; i++){
+			int n = hst_neighbors[i];
+			glVertex2f(hst_agents[n].pos.x, hst_agents[n].pos.y);
+			glVertex2f(hst_agents[n].pos.x+1, hst_agents[n].pos.y+1);
+
+		}
+
 		// Draw intersection points
+		/*
 		glColor3f(0.0,1.0,0.0);
 		for (int i = 0; i < 30; i++){
 			if (hst_intersections[i].isIntersection){
@@ -288,6 +302,7 @@ void mainLoop() {
 				glVertex2f(hst_intersections[i].point.x+1.0f, hst_intersections[i].point.y+1.0f);
 			}
 		}
+		*/
 		glEnd();
         glUseProgram(0);
         glBindVertexArray(0);

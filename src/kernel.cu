@@ -39,7 +39,7 @@ void checkCUDAError(const char *msg, int line = -1) {
 /*! Block size used for CUDA kernel launch. */
 #define blockSize 128
 #define robot_radius 0.5
-#define circle_radius 4
+#define circle_radius 5
 #define desired_speed 3.0f
 
 #define GRIDMAX 20 // Must be even, creates grid of GRIDMAX x GRIDMAX size
@@ -360,6 +360,7 @@ __global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
 		agents[index].pos.y = scale * circle_radius * sin(rad);
 		agents[index].pos.z = 0.0;
 
+		/*
 		if (index == 0){
 			agents[index].pos = glm::vec3(1.0,1.0,0.0);
 		}
@@ -372,6 +373,7 @@ __global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
 		else if (index == 3){
 			agents[index].pos = glm::vec3(-2.0, 2.0, 0.0);
 		}
+		*/
 
 		agents[index].goal = -agents[index].pos;
 		agents[index].radius = radius;
@@ -441,7 +443,7 @@ __global__ void kernCopyFVOtoEndpoints(int N, glm::vec2* endpoints, FVO* fvos){
 /**
  * Wrapper for call to the kernCopyPlanetsToVBO CUDA kernel.
  */
-void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos, agent* agents, intersection* intersections) {
+void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos, agent* agents, intersection* intersections, int* neighbors,  int* num_neighbors) {
     dim3 fullBlocksPerGrid((int)ceil(float(numAgents) / float(blockSize)));
 
     kernCopyPlanetsToVBO<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_pos, vbodptr, scene_scale);
@@ -452,7 +454,9 @@ void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3*
 
 	cudaMemcpy(pos, dev_pos, numAgents*sizeof(glm::vec3), cudaMemcpyDeviceToHost);
 	cudaMemcpy(agents, dev_agents, numAgents*sizeof(agent), cudaMemcpyDeviceToHost);
-	cudaMemcpy(intersections, dev_intersections, totIntersections*sizeof(intersection), cudaMemcpyDeviceToHost);
+	//cudaMemcpy(intersections, dev_intersections, totIntersections*sizeof(intersection), cudaMemcpyDeviceToHost);
+	cudaMemcpy(neighbors, dev_ug_neighbors, numAgents*numNeighbors*sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(num_neighbors, dev_num_neighbors, numAgents*sizeof(int), cudaMemcpyDeviceToHost);
 
     cudaThreadSynchronize();
 }
@@ -707,11 +711,13 @@ __global__ void kernComputeUGNeighbors(int numAgents, int max_num_neighbors, int
 			int dx = dxs[i];
 			int dy = dys[i];
 
-			if (dx < 0 || dy < 0 || dx >= GRIDMAX || dy >= GRIDMAX){
-				continue;
-			}
 			ncell.x = cell.x + dx;
 			ncell.y = cell.y + dy;
+
+			if (ncell.x < 0 || ncell.y < 0 || ncell.x >= GRIDMAX || ncell.y >= GRIDMAX){
+				continue;
+			}
+
 			int ncellId = getIdFromCell(ncell);
 
 			int start = startIdx[ncellId];
@@ -781,8 +787,12 @@ void ClearPath::stepSimulation(float dt) {
 	cudaFree(dev_neighbors);
 	cudaFree(dev_fvos);
 	cudaFree(dev_endpoints);
+	
+	/*
 	cudaFree(dev_intersections);
 	cudaFree(dev_constraints);
+	*/
+
 	cudaFree(dev_uglist);
 	cudaFree(dev_startIdx);
 	cudaFree(dev_ug_neighbors);
@@ -791,8 +801,12 @@ void ClearPath::stepSimulation(float dt) {
 	cudaMalloc((void**)&dev_neighbors, totFVOs*sizeof(int));
 	cudaMalloc((void**)&dev_fvos, totFVOs*sizeof(FVO));
 	cudaMalloc((void**)&dev_endpoints, 6*totFVOs*sizeof(glm::vec2));
+
+	/*
 	cudaMalloc((void**)&dev_constraints, totConstraints*sizeof(constraint));
 	cudaMalloc((void**)&dev_intersections, totIntersections*sizeof(intersection));
+	*/
+	
 	cudaMalloc((void**)&dev_uglist, numAgents*sizeof(UGEntry));
 	cudaMalloc((void**)&dev_startIdx, GRIDMAX*GRIDMAX*sizeof(int));
 	cudaMalloc((void**)&dev_ug_neighbors, numNeighbors*numAgents*sizeof(int));
@@ -819,7 +833,6 @@ void ClearPath::stepSimulation(float dt) {
 	kernInitStartIdxes<<<fullBlocksForUG, blockSize>>>(GRIDMAX*GRIDMAX, dev_startIdx);
 	kernUGStartIdxes<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_startIdx, dev_uglist);
 	
-	/*
 	UGEntry* hst_uglist = (UGEntry*)malloc(numAgents * sizeof(UGEntry));
 	cudaMemcpy(hst_uglist, dev_uglist, numAgents*sizeof(UGEntry), cudaMemcpyDeviceToHost);
 	for (int i = 0; i < numAgents; i++){
@@ -837,9 +850,9 @@ void ClearPath::stepSimulation(float dt) {
 
 	free(hst_uglist);
 	free(hst_startIdx);
-	*/
 
 	// Get the neighbors
+
 	kernComputeUGNeighbors<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_ug_neighbors, dev_num_neighbors, dev_agents, dev_startIdx, dev_uglist);
 
 	int* hst_ug_neighbors = (int*)malloc(numAgents*numNeighbors*sizeof(int));
@@ -847,6 +860,19 @@ void ClearPath::stepSimulation(float dt) {
 
 	cudaMemcpy(hst_ug_neighbors, dev_ug_neighbors, numAgents*numNeighbors*sizeof(int), cudaMemcpyDeviceToHost);
 	cudaMemcpy(hst_num_neighbors, dev_num_neighbors, numAgents*sizeof(int), cudaMemcpyDeviceToHost);
+
+
+	for (int i = 0; i < numAgents; i++){
+		printf("agent %d: ", i);
+		for (int j = 0; j < hst_num_neighbors[i]; j++){
+			printf("%d ", hst_ug_neighbors[i*numNeighbors+j]);
+		}
+		printf("\n");
+	}
+
+	free(hst_ug_neighbors);
+	free(hst_num_neighbors);
+	
 
 	// Compute the FVOs
 	kernComputeFVOs<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_fvos, dev_agents, dev_neighbors);
@@ -858,13 +884,15 @@ void ClearPath::stepSimulation(float dt) {
 	kernCheckInPCR<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_in_pcr, dev_agents, dev_fvos);
 
 	// Gather each constraint so we can easily track intersections
-	kernConvertFVOsToConstraints<<<fullBlocksForFVOs, blockSize>>>(totFVOs, numAgents, numNeighbors, dev_constraints, dev_fvos);
+	//kernConvertFVOsToConstraints<<<fullBlocksForFVOs, blockSize>>>(totFVOs, numAgents, numNeighbors, dev_constraints, dev_fvos);
 
 	// Compute all the intersection points
+	/*
 	kernFindIntersections<<<fullBlocksForFVOs, blockSize>>>(totConstraints, numAgents, numConstraints, numIntersections, dev_intersections, dev_constraints);
 
 	intersection* hst_intersection = (intersection*)malloc(totIntersections*sizeof(intersection));
 	cudaMemcpy(hst_intersection, dev_intersections, totIntersections*sizeof(intersection), cudaMemcpyDeviceToHost);
+	*/
 
 	// Compute Intersection Points
 	//kernComputeintersections<<<fullBlocksPerGrid, blockSize>>>();

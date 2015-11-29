@@ -64,5 +64,5 @@ namespace ClearPath {
 
 	void initSimulation(int N);
 	void stepSimulation(float dt);
-	void copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos, agent* agents, intersection* intersections);
+	void copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos, agent* agents, intersection* intersections, int* neighbors, int* num_neighbors);
 }
