@@ -6,6 +6,17 @@
 #include <cmath>
 
 namespace ClearPath {
+
+	struct Cell{
+		int x;
+		int y;
+	};
+
+	struct UGEntry{
+		int cellId;
+		int agentId;
+	};
+
 	struct agent{
 		glm::vec3 pos;
 		glm::vec3 vel;
@@ -43,6 +54,12 @@ namespace ClearPath {
 		bool isOutside;
 		bool isIntersection;
 		//float distToRayOrigin;
+	};
+
+	struct UGComp{
+		__host__ __device__ bool operator()(const UGEntry &a, const UGEntry &b){
+			return a.cellId < b.cellId;
+		}
 	};
 
 	void initSimulation(int N);

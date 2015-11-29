@@ -1,4 +1,7 @@
 #define GLM_FORCE_CUDA
+#include <thrust/sort.h>
+#include <thrust/device_ptr.h>
+#include <thrust/device_vector.h>
 #include <stdio.h>
 #include <cuda.h>
 #include <cmath>
@@ -7,7 +10,7 @@
 #include <glm/gtx/rotate_vector.hpp>
 #include "utilityCore.hpp"
 #include "kernel.h"
-#include <vector>
+//#include <vector>
 
 #define checkCUDAErrorWithLine(msg) checkCUDAError(msg, __LINE__)
 
@@ -39,6 +42,9 @@ void checkCUDAError(const char *msg, int line = -1) {
 #define circle_radius 5
 #define desired_speed 3.0f
 
+#define GRIDMAX 10 // Must be even, creates grid of GRIDMAX x GRIDMAX size
+#define NNRADIUS 2.0f
+
 /***********************************************
 * Kernel state (pointers are device pointers) *
 ***********************************************/
@@ -66,9 +72,48 @@ int* dev_neighbors; //index of neighbors
 bool* dev_in_pcr;
 ray* dev_rays;
 constraint* dev_constraints;
+UGEntry* dev_uglist;
 
 glm::vec3* dev_closest_points;
 intersection* dev_intersections;
+
+/*******************
+* Uniform Grid Functions *
+********************/
+
+__host__ __device__ Cell getGridCell(float radius, agent a){
+	Cell cell;
+
+	// Grid top-left corner
+	glm::vec3 tlc = glm::vec3(-GRIDMAX/2,GRIDMAX/2,0) * radius;
+	glm::vec3 dist = glm::abs(a.pos - tlc);
+	cell.x = int(dist.x / radius);
+	cell.y = int(dist.y / radius);
+
+	return cell;
+}
+
+__host__ __device__ int getIdFromCell(Cell cell){
+	return cell.x + cell.y*GRIDMAX;
+}
+
+__host__ __device__ Cell getCellFromId(int id){
+	Cell cell;
+	cell.x = id % GRIDMAX;
+	cell.y = id / GRIDMAX;
+	return cell;
+}
+
+__global__ void kernUpdateUniformGrid(int numAgents, UGEntry* uglist, agent* agents){
+	int index = (blockDim.x * blockIdx.x) + threadIdx.x;
+
+	if (index < numAgents){
+		UGEntry ug;
+		ug.agentId = agents[index].id;
+		ug.cellId = getIdFromCell(getGridCell(NNRADIUS, agents[index]));
+		uglist[index] = ug;
+	}
+}
 
 /*******************
 * Helper functions *
@@ -547,8 +592,23 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 		int j = 0;
 
 		// %3 in order to skip comparing an FVO with itself
-		for (int i = 0; i < cc-(cc%3); i++){
+		for (int i = 0; i < cc - (cc % 3); i++){
 			oc = constraints[i + cr*numConstraints];
+
+			if (c.isRay && oc.isRay){
+				point = intersectRayRay(c.ray, oc.ray);
+			}
+			else if (c.isRay && !oc.isRay){
+				point = intersectRaySegment(c.ray,oc.ray.pos,oc.endpoint);
+			}
+			else if (!c.isRay && oc.isRay){
+				point = intersectRaySegment(oc.ray, c.ray.pos, c.endpoint);
+			}
+			else {
+				point = intersectSegmentSegment(c.ray.pos, c.endpoint, oc.ray.pos, oc.endpoint);
+			}
+
+			/*
 			point = intersectRayRay(c.ray,oc.ray);
 			
 			point.isIntersection = point.isIntersection && (
@@ -556,13 +616,29 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 								   (c.isRay && !oc.isRay && glm::distance(oc.ray.pos,point.point) <= glm::distance(oc.ray.pos, oc.endpoint)) ||
 								   (!c.isRay && oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint)) ||
 								   (!c.isRay && !oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint) && glm::distance(oc.ray.pos, point.point) <= glm::distance(oc.ray.pos, oc.endpoint)));
+			*/
 
-			intersections[i*numConstraints + j + cr*numIntersections] = point;
+			intersections[i*(numConstraints-3) + j + cr*numIntersections] = point;
 			j++;
 		}
 
 		for (int i = cc + (3-cc%3); i < numConstraints; i++){
 			oc = constraints[i + cr*numConstraints];
+
+			if (c.isRay && oc.isRay){
+				point = intersectRayRay(c.ray, oc.ray);
+			}
+			else if (c.isRay && !oc.isRay){
+				point = intersectRaySegment(c.ray, oc.ray.pos, oc.endpoint);
+			}
+			else if (!c.isRay && oc.isRay){
+				point = intersectRaySegment(oc.ray, c.ray.pos, c.endpoint);
+			}
+			else {
+				point = intersectSegmentSegment(c.ray.pos, c.endpoint, oc.ray.pos, oc.endpoint);
+			}
+
+			/*
 			point = intersectRayRay(c.ray, oc.ray);
 			
 			point.isIntersection = point.isIntersection && (
@@ -570,8 +646,9 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 				(c.isRay && !oc.isRay && glm::distance(oc.ray.pos, point.point) <= glm::distance(oc.ray.pos, oc.endpoint)) ||
 				(!c.isRay && oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint)) ||
 				(!c.isRay && !oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint) && glm::distance(oc.ray.pos, point.point) <= glm::distance(oc.ray.pos, oc.endpoint)));
+			*/
 
-			intersections[i*numConstraints + j + cr*numIntersections] = point;
+			intersections[i*(numConstraints-3) + j + cr*numIntersections] = point;
 			j++;
 		}
 	}
@@ -586,6 +663,7 @@ __global__ void kernUpdatePos(int N, float dt, agent* dev_agents, glm::vec3 *dev
 		dev_pos[index] = dev_agents[index].pos;
 	}
 }
+
 
 /**
  * Step the entire N-body simulation by `dt` seconds.
@@ -617,18 +695,40 @@ void ClearPath::stepSimulation(float dt) {
 	cudaFree(dev_endpoints);
 	cudaFree(dev_intersections);
 	cudaFree(dev_constraints);
+	cudaFree(dev_uglist);
 
 	cudaMalloc((void**)&dev_neighbors, totFVOs*sizeof(int));
 	cudaMalloc((void**)&dev_fvos, totFVOs*sizeof(FVO));
 	cudaMalloc((void**)&dev_endpoints, 6*totFVOs*sizeof(glm::vec2));
 	cudaMalloc((void**)&dev_constraints, totConstraints*sizeof(constraint));
 	cudaMalloc((void**)&dev_intersections, totIntersections*sizeof(intersection));
+	cudaMalloc((void**)&dev_uglist, numAgents*sizeof(UGEntry));
 
 	cudaMemset(dev_in_pcr, false, numAgents*sizeof(bool));
+	cudaThreadSynchronize();
 
 	// Find neighbors
 	// TODO: 2 arrays: 1 of all the ones that have same # neighbors, other has the remaining uncomputed ones
 	kernComputeNeighbors<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_neighbors, dev_agents);
+	//cudaThreadSynchronize();
+
+	// Compute Neighbors with the Uniform Grid
+	kernUpdateUniformGrid<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_uglist, dev_agents);
+	//cudaThreadSynchronize();
+
+	// Sort by cell id
+	thrust::device_ptr<UGEntry> thrust_uglist = thrust::device_pointer_cast(dev_uglist);
+	thrust::sort(thrust_uglist, thrust_uglist+numAgents, UGComp());
+
+
+	UGEntry* hst_uglist = (UGEntry*)malloc(numAgents * sizeof(UGEntry));
+	cudaMemcpy(hst_uglist, dev_uglist, numAgents*sizeof(UGEntry),cudaMemcpyDeviceToHost);
+	for (int i = 0; i < numAgents; i++){
+		printf("(cell %d, agent %d)\n", hst_uglist[i].cellId, hst_uglist[i].agentId);
+	}
+	free(hst_uglist);
+	// Get the neighbors
+
 
 	// Compute the FVOs
 	kernComputeFVOs<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_fvos, dev_agents, dev_neighbors);
