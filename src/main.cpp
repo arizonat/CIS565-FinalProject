@@ -14,7 +14,7 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 10;
+const int N_FOR_VIS = 4;
 const float DT = 0.005f; //TODO: originally 0.2
 
 glm::vec3* hst_pos;
@@ -23,6 +23,7 @@ ClearPath::segment* hst_segments;
 ClearPath::agent* hst_agents;
 int* hst_neighbors;
 int* hst_num_neighbors;
+int tot_num_intersections;
 
 /**
  * C main function.
@@ -127,8 +128,11 @@ bool init(int argc, char **argv) {
 
 	hst_pos = (glm::vec3*)malloc(N_FOR_VIS*sizeof(glm::vec3));
 	hst_agents = (ClearPath::agent*)malloc(N_FOR_VIS*sizeof(ClearPath::agent));
-	//TODO: this should NOT be hardcoded!!!
-	//hst_intersections = (ClearPath::intersection*)malloc(90*sizeof(ClearPath::intersection));
+	
+	tot_num_intersections = (N_FOR_VIS - 1) * 3 * ((N_FOR_VIS - 1) * 3 - 3) * N_FOR_VIS;
+	printf("hst intersections: %d\n", tot_num_intersections);
+	hst_intersections = (ClearPath::intersection*)malloc(tot_num_intersections*sizeof(ClearPath::intersection));
+	
 	hst_neighbors = (int*)malloc(N_FOR_VIS*(N_FOR_VIS-1)*sizeof(int));
 	hst_num_neighbors = (int*)malloc(N_FOR_VIS*sizeof(int));
 
@@ -279,6 +283,7 @@ void mainLoop() {
 		}
 
 		// Draw velocity vectors
+		glColor3f(1.0, 1.0, 0.0);
 		for (int i = 0; i < N_FOR_VIS; i++){
 			glVertex2f(hst_agents[i].pos.x, hst_agents[i].pos.y);
 			glVertex2f(hst_agents[i].pos.x+hst_agents[i].vel.x, hst_agents[i].pos.y+hst_agents[i].vel.y);
@@ -294,15 +299,14 @@ void mainLoop() {
 		}
 
 		// Draw intersection points
-		/*
 		glColor3f(0.0,1.0,0.0);
-		for (int i = 0; i < 30; i++){
+		for (int i = 0; i < tot_num_intersections/N_FOR_VIS; i++){
 			if (hst_intersections[i].isIntersection){
 				glVertex2f(hst_intersections[i].point.x, hst_intersections[i].point.y);
 				glVertex2f(hst_intersections[i].point.x+1.0f, hst_intersections[i].point.y+1.0f);
 			}
 		}
-		*/
+
 		glEnd();
         glUseProgram(0);
         glBindVertexArray(0);

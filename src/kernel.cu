@@ -39,7 +39,7 @@ void checkCUDAError(const char *msg, int line = -1) {
 /*! Block size used for CUDA kernel launch. */
 #define blockSize 128
 #define robot_radius 0.5
-#define circle_radius 5
+#define circle_radius 4
 #define desired_speed 3.0f
 
 #define GRIDMAX 20 // Must be even, creates grid of GRIDMAX x GRIDMAX size
@@ -151,32 +151,49 @@ __host__ __device__ intersection intersectRayRay(ray a, ray b){
 }
 
 __host__ __device__ intersection intersectSegmentSegment(glm::vec3 p1, glm::vec3 p2, glm::vec3 p3, glm::vec3 p4){
-	// Re-uses intersectRaySegment, just make the Ray finite length
-
-	ray a;
-	a.pos = p1;
-	a.dir = p2 - p1;
-	float len = glm::length(a.dir);
-	a.dir = glm::normalize(a.dir);
-
+	//https://www.topcoder.com/community/data-science/data-science-tutorials/geometry-concepts-line-intersection-and-its-applications/
+	
 	intersection point;
 	point.isIntersection = false;
 
-	glm::vec3 v1 = a.pos - p3;
-	glm::vec3 v2 = p4 - p3;
-	glm::vec3 v3 = glm::vec3(-a.dir.y, a.dir.x, 0.0);
+	float A1 = p2.y - p1.y;
+	float B1 = p1.x - p2.x;
+	float C1 = A1*p1.x + B1*p1.y;
 
-	float t1 = glm::length(glm::cross(v2, v1)) / glm::dot(v2, v3);
-	float t2 = glm::dot(v1, v3) / glm::dot(v2, v3);
+	float A2 = p4.y - p3.y;
+	float B2 = p3.x - p4.x;
+	float C2 = A2*p3.x + B2*p3.y;
 
-	if (t1 >= 0 && t2 <= len && t2 >= 0 && t2 <= 1)
-	{
-		// Return the point of intersection
-		point.point = a.pos + t1 * a.dir;
-		point.isIntersection = true;
+	float det = A1*B2 - A2*B1;
+	if (det == 0){
+		return point;
 	}
-
+	point.point.x = (B2*C1 - B1*C2) / det;
+	point.point.y = (A1*C2 - A2*C1) / det;
+	
+	point.isIntersection = glm::min(p1.x, p2.x) <= point.point.x && 
+						   glm::max(p1.x, p2.x) >= point.point.x && 
+						   glm::min(p1.y, p2.y) <= point.point.y &&
+						   glm::max(p1.y, p2.y) >= point.point.y &&
+						   glm::min(p3.x, p4.x) <= point.point.x &&
+						   glm::max(p3.x, p4.x) >= point.point.x &&
+						   glm::min(p3.y, p4.y) <= point.point.y &&
+						   glm::max(p3.y, p4.y) >= point.point.y;
 	return point;
+}
+
+__host__ __device__ intersection intersectRay2Segment(ray a, glm::vec3 p1, glm::vec3 p2){
+	intersection p = intersectSegmentSegment(a.pos, a.pos+a.dir, p1, p2);
+
+	glm::vec3 pdir = glm::normalize(p.point - a.pos);
+
+	//TODO check if parallel
+	p.isIntersection = glm::min(p1.x, p2.x) <= p.point.x &&
+					   glm::max(p1.x, p2.x) >= p.point.x &&
+					   glm::min(p1.y, p2.y) <= p.point.y &&
+					   glm::max(p1.y, p2.y) >= p.point.y &&
+					   glm::dot(a.dir, pdir) > 0;
+	return p;
 }
 
 __host__ __device__ intersection intersectRaySegment(ray a, glm::vec3 p1, glm::vec3 p2){
@@ -454,9 +471,11 @@ void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3*
 
 	cudaMemcpy(pos, dev_pos, numAgents*sizeof(glm::vec3), cudaMemcpyDeviceToHost);
 	cudaMemcpy(agents, dev_agents, numAgents*sizeof(agent), cudaMemcpyDeviceToHost);
-	//cudaMemcpy(intersections, dev_intersections, totIntersections*sizeof(intersection), cudaMemcpyDeviceToHost);
-	cudaMemcpy(neighbors, dev_ug_neighbors, numAgents*numNeighbors*sizeof(int), cudaMemcpyDeviceToHost);
-	cudaMemcpy(num_neighbors, dev_num_neighbors, numAgents*sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(intersections, dev_intersections, totIntersections*sizeof(intersection), cudaMemcpyDeviceToHost);
+	
+	// UG
+	//cudaMemcpy(neighbors, dev_ug_neighbors, numAgents*numNeighbors*sizeof(int), cudaMemcpyDeviceToHost);
+	//cudaMemcpy(num_neighbors, dev_num_neighbors, numAgents*sizeof(int), cudaMemcpyDeviceToHost);
 
     cudaThreadSynchronize();
 }
@@ -597,7 +616,7 @@ __global__ void kernConvertFVOsToConstraints(int numFVOs, int numAgents, int num
 }
 
 __global__ void kernFindIntersections(int totConstraints, int numAgents, int numConstraints, int numIntersections, intersection* intersections, const constraint* constraints){
-	// totFVO is the number of constraints
+	// totConstraints is the number of constraints
 	// Parallelizes over the constraints
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
@@ -610,7 +629,7 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 		constraint c = constraints[index];
 		constraint oc;
 
-		// Iterate through all the other FVOs
+		// Iterate through all the other constraints
 		int j = 0;
 
 		// %3 in order to skip comparing an FVO with itself
@@ -621,10 +640,10 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 				point = intersectRayRay(c.ray, oc.ray);
 			}
 			else if (c.isRay && !oc.isRay){
-				point = intersectRaySegment(c.ray,oc.ray.pos,oc.endpoint);
+				point = intersectRay2Segment(c.ray,oc.ray.pos,oc.endpoint);
 			}
 			else if (!c.isRay && oc.isRay){
-				point = intersectRaySegment(oc.ray, c.ray.pos, c.endpoint);
+				point = intersectRay2Segment(oc.ray, c.ray.pos, c.endpoint);
 			}
 			else {
 				point = intersectSegmentSegment(c.ray.pos, c.endpoint, oc.ray.pos, oc.endpoint);
@@ -640,7 +659,7 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 								   (!c.isRay && !oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint) && glm::distance(oc.ray.pos, point.point) <= glm::distance(oc.ray.pos, oc.endpoint)));
 			*/
 
-			intersections[i*(numConstraints-3) + j + cr*numIntersections] = point;
+			intersections[cc*(numConstraints-3) + j + cr*numIntersections] = point;
 			j++;
 		}
 
@@ -651,10 +670,10 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 				point = intersectRayRay(c.ray, oc.ray);
 			}
 			else if (c.isRay && !oc.isRay){
-				point = intersectRaySegment(c.ray, oc.ray.pos, oc.endpoint);
+				point = intersectRay2Segment(c.ray, oc.ray.pos, oc.endpoint);
 			}
 			else if (!c.isRay && oc.isRay){
-				point = intersectRaySegment(oc.ray, c.ray.pos, c.endpoint);
+				point = intersectRay2Segment(oc.ray, c.ray.pos, c.endpoint);
 			}
 			else {
 				point = intersectSegmentSegment(c.ray.pos, c.endpoint, oc.ray.pos, oc.endpoint);
@@ -670,7 +689,7 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 				(!c.isRay && !oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint) && glm::distance(oc.ray.pos, point.point) <= glm::distance(oc.ray.pos, oc.endpoint)));
 			*/
 
-			intersections[i*(numConstraints-3) + j + cr*numIntersections] = point;
+			intersections[cc*(numConstraints-3) + j + cr*numIntersections] = point;
 			j++;
 		}
 	}
@@ -763,6 +782,15 @@ __global__ void kernUGStartIdxes(int numAgents, int* startIdx, UGEntry* ug_list)
  */
 void ClearPath::stepSimulation(float dt) {
 
+	glm::vec3 p1 = glm::vec3(0.0);
+	glm::vec3 p2 = glm::vec3(0.0,1.0,0.0);
+	glm::vec3 p3 = glm::vec3(0.5,0.5,0.0);
+	glm::vec3 p4 = glm::vec3(1.0,0.5,0.0);
+
+	intersection p = intersectSegmentSegment(p1,p2,p3,p4);
+
+	printf("%d: %f %f\n", p.isIntersection, p.point.x, p.point.y);
+
 	dim3 fullBlocksPerGrid((numAgents + blockSize - 1) / blockSize);
 
 	// Update all the desired velocities given current positions
@@ -771,7 +799,7 @@ void ClearPath::stepSimulation(float dt) {
 	// Allocate space for neighbors, FVOs, intersection points (how to do this?)
 	numNeighbors = numAgents - 1;
 	numFVOs = numNeighbors;
-	numConstraints = numFVOs * 3;
+	numConstraints = numFVOs * 3; // number of constraints that each robot has to compare
 	numIntersections = numConstraints * (numConstraints - 3); //-3 to remove constraints from the same FVO
 	
 	totNeighbors = numNeighbors * numAgents;
@@ -779,8 +807,14 @@ void ClearPath::stepSimulation(float dt) {
 	totConstraints = numConstraints * numAgents;
 	totIntersections = numIntersections * numAgents;
 
+	printf("num constraints per robot: %d\n", numConstraints);
+	printf("total num constraints: %d\n", totConstraints);
+	printf("num intersections per robot: %d\n", numIntersections);
+	printf("dev intersections: %d\n",totIntersections);
+
 	// Get the number of blocks we need
 	dim3 fullBlocksForFVOs((totFVOs + blockSize - 1) / blockSize);
+	dim3 fullBlocksForConstraints((totConstraints + blockSize - 1) / blockSize);
 	dim3 fullBlocksForUG((GRIDMAX*GRIDMAX + blockSize - 1) / blockSize);
 
 	// Free everything
@@ -788,29 +822,31 @@ void ClearPath::stepSimulation(float dt) {
 	cudaFree(dev_fvos);
 	cudaFree(dev_endpoints);
 	
-	/*
 	cudaFree(dev_intersections);
 	cudaFree(dev_constraints);
-	*/
 
+	// UG
+	/*
 	cudaFree(dev_uglist);
 	cudaFree(dev_startIdx);
 	cudaFree(dev_ug_neighbors);
 	cudaFree(dev_num_neighbors);
+	*/
 
 	cudaMalloc((void**)&dev_neighbors, totFVOs*sizeof(int));
 	cudaMalloc((void**)&dev_fvos, totFVOs*sizeof(FVO));
 	cudaMalloc((void**)&dev_endpoints, 6*totFVOs*sizeof(glm::vec2));
 
-	/*
 	cudaMalloc((void**)&dev_constraints, totConstraints*sizeof(constraint));
 	cudaMalloc((void**)&dev_intersections, totIntersections*sizeof(intersection));
-	*/
 	
+	// UG
+	/*
 	cudaMalloc((void**)&dev_uglist, numAgents*sizeof(UGEntry));
 	cudaMalloc((void**)&dev_startIdx, GRIDMAX*GRIDMAX*sizeof(int));
 	cudaMalloc((void**)&dev_ug_neighbors, numNeighbors*numAgents*sizeof(int));
 	cudaMalloc((void**)&dev_num_neighbors, numAgents*sizeof(int));
+	*/
 
 	// TODO: this should actually be a kernel initialization
 	cudaMemset(dev_in_pcr, false, numAgents*sizeof(bool));
@@ -821,7 +857,8 @@ void ClearPath::stepSimulation(float dt) {
 	kernComputeNeighbors<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_neighbors, dev_agents);
 	cudaThreadSynchronize();
 
-	// Compute Neighbors with the Uniform Grid
+	// Compute Neighbors with the Uniform Grid (UG)
+	/*
 	kernUpdateUniformGrid<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_uglist, dev_agents);
 	//cudaThreadSynchronize();
 
@@ -872,7 +909,7 @@ void ClearPath::stepSimulation(float dt) {
 
 	free(hst_ug_neighbors);
 	free(hst_num_neighbors);
-	
+	*/
 
 	// Compute the FVOs
 	kernComputeFVOs<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_fvos, dev_agents, dev_neighbors);
@@ -884,21 +921,20 @@ void ClearPath::stepSimulation(float dt) {
 	kernCheckInPCR<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_in_pcr, dev_agents, dev_fvos);
 
 	// Gather each constraint so we can easily track intersections
-	//kernConvertFVOsToConstraints<<<fullBlocksForFVOs, blockSize>>>(totFVOs, numAgents, numNeighbors, dev_constraints, dev_fvos);
+	kernConvertFVOsToConstraints<<<fullBlocksForFVOs, blockSize>>>(totFVOs, numAgents, numNeighbors, dev_constraints, dev_fvos);
 
 	// Compute all the intersection points
-	/*
-	kernFindIntersections<<<fullBlocksForFVOs, blockSize>>>(totConstraints, numAgents, numConstraints, numIntersections, dev_intersections, dev_constraints);
+	kernFindIntersections<<<fullBlocksForConstraints, blockSize>>>(totConstraints, numAgents, numConstraints, numIntersections, dev_intersections, dev_constraints);
 
 	intersection* hst_intersection = (intersection*)malloc(totIntersections*sizeof(intersection));
 	cudaMemcpy(hst_intersection, dev_intersections, totIntersections*sizeof(intersection), cudaMemcpyDeviceToHost);
-	*/
 
-	// Compute Intersection Points
-	//kernComputeintersections<<<fullBlocksPerGrid, blockSize>>>();
-	//for (int i = 0; i < numNeighbors; i++){
-	//	kernFindIntersections<<<fullBlocksPerGrid, blockSize>>>(numAgents, true, i, dev_intersections, dev_agents, dev_fvos);
-	//}
+	for (int i = 0; i < numIntersections; i++){
+		if (hst_intersection[i].isIntersection){
+			printf("%d  ",i);
+		}
+	}
+
 
 	// Compute Inside/Outside Points
 
