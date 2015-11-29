@@ -129,7 +129,7 @@ bool init(int argc, char **argv) {
 	hst_pos = (glm::vec3*)malloc(N_FOR_VIS*sizeof(glm::vec3));
 	hst_agents = (ClearPath::agent*)malloc(N_FOR_VIS*sizeof(ClearPath::agent));
 	
-	tot_num_intersections = (N_FOR_VIS - 1) * 3 * ((N_FOR_VIS - 1) * 3 - 3) * N_FOR_VIS;
+	tot_num_intersections = (N_FOR_VIS - 1) * 3 * ((N_FOR_VIS - 1) * 3 - 1) * N_FOR_VIS;
 	printf("hst intersections: %d\n", tot_num_intersections);
 	hst_intersections = (ClearPath::intersection*)malloc(tot_num_intersections*sizeof(ClearPath::intersection));
 	
@@ -302,8 +302,12 @@ void mainLoop() {
 		glColor3f(0.0,1.0,0.0);
 		for (int i = 0; i < tot_num_intersections/N_FOR_VIS; i++){
 			if (hst_intersections[i].isIntersection){
-				glVertex2f(hst_intersections[i].point.x, hst_intersections[i].point.y);
-				glVertex2f(hst_intersections[i].point.x+1.0f, hst_intersections[i].point.y+1.0f);
+				glVertex2f(hst_intersections[i].point.x - 0.5, hst_intersections[i].point.y - 0.5);
+				glVertex2f(hst_intersections[i].point.x + 0.5f, hst_intersections[i].point.y + 0.5f);
+				glVertex2f(hst_intersections[i].point.x - 0.5, hst_intersections[i].point.y + 0.5);
+				glVertex2f(hst_intersections[i].point.x + 0.5f, hst_intersections[i].point.y - 0.5f);
+				glVertex2f(hst_intersections[i].point.x, hst_intersections[i].point.y - 0.5);
+				glVertex2f(hst_intersections[i].point.x, hst_intersections[i].point.y + 0.5f);
 			}
 		}
 

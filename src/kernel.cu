@@ -182,7 +182,7 @@ __host__ __device__ intersection intersectSegmentSegment(glm::vec3 p1, glm::vec3
 	return point;
 }
 
-__host__ __device__ intersection intersectRay2Segment(ray a, glm::vec3 p1, glm::vec3 p2){
+__host__ __device__ intersection intersectRaySegment(ray a, glm::vec3 p1, glm::vec3 p2){
 	intersection p = intersectSegmentSegment(a.pos, a.pos+a.dir, p1, p2);
 
 	glm::vec3 pdir = glm::normalize(p.point - a.pos);
@@ -194,31 +194,6 @@ __host__ __device__ intersection intersectRay2Segment(ray a, glm::vec3 p1, glm::
 					   glm::max(p1.y, p2.y) >= p.point.y &&
 					   glm::dot(a.dir, pdir) > 0;
 	return p;
-}
-
-__host__ __device__ intersection intersectRaySegment(ray a, glm::vec3 p1, glm::vec3 p2){
-	// http://stackoverflow.com/questions/14307158/how-do-you-check-for-intersection-between-a-line-segment-and-a-line-ray-emanatin
-	// http://gamedev.stackexchange.com/questions/85850/collision-intersection-of-2d-ray-to-line-segment
-	// https://rootllama.wordpress.com/2014/06/20/ray-line-segment-intersection-test-in-2d/
-
-	intersection point;
-	point.isIntersection = false;
-
-	glm::vec3 v1 = a.pos - p1;
-	glm::vec3 v2 = p2 - p1;
-	glm::vec3 v3 = glm::vec3(-a.dir.y, a.dir.x, 0.0);
-
-	float t1 = glm::length(glm::cross(v2,v1))/glm::dot(v2,v3);
-	float t2 = glm::dot(v1, v3) / glm::dot(v2, v3);
-
-	if (t1 >= 0 && t2 >= 0 && t2 <= 1)
-	{
-		// Return the point of intersection
-		point.point = a.pos + t1 * a.dir;
-		point.isIntersection = true;
-	}
-
-	return point;
 }
 
 __host__ __device__ glm::vec3 projectPointToLine(glm::vec3 a, glm::vec3 b, glm::vec3 p){
@@ -629,8 +604,22 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 		constraint c = constraints[index];
 		constraint oc;
 
-		// Iterate through all the other constraints
+		// Iterate through all the other constraints and add intersections
 		int j = 0;
+
+		// My own startpoint is an intersection of this constraint
+		point.point = c.ray.pos;
+		point.isIntersection = true;
+		intersections[cc*(numConstraints - 1) + j + cr*numIntersections] = point;
+		j++;
+
+		// If T constraint, then endpoint is also an intersection
+		if (!c.isRay){
+			point.point = c.endpoint;
+			point.isIntersection = true;
+			intersections[cc*(numConstraints - 1) + j + cr*numIntersections] = point;
+			j++;
+		}
 
 		// %3 in order to skip comparing an FVO with itself
 		for (int i = 0; i < cc - (cc % 3); i++){
@@ -640,10 +629,10 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 				point = intersectRayRay(c.ray, oc.ray);
 			}
 			else if (c.isRay && !oc.isRay){
-				point = intersectRay2Segment(c.ray,oc.ray.pos,oc.endpoint);
+				point = intersectRaySegment(c.ray,oc.ray.pos,oc.endpoint);
 			}
 			else if (!c.isRay && oc.isRay){
-				point = intersectRay2Segment(oc.ray, c.ray.pos, c.endpoint);
+				point = intersectRaySegment(oc.ray, c.ray.pos, c.endpoint);
 			}
 			else {
 				point = intersectSegmentSegment(c.ray.pos, c.endpoint, oc.ray.pos, oc.endpoint);
@@ -659,7 +648,7 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 								   (!c.isRay && !oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint) && glm::distance(oc.ray.pos, point.point) <= glm::distance(oc.ray.pos, oc.endpoint)));
 			*/
 
-			intersections[cc*(numConstraints-3) + j + cr*numIntersections] = point;
+			intersections[cc*(numConstraints-1) + j + cr*numIntersections] = point;
 			j++;
 		}
 
@@ -670,10 +659,10 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 				point = intersectRayRay(c.ray, oc.ray);
 			}
 			else if (c.isRay && !oc.isRay){
-				point = intersectRay2Segment(c.ray, oc.ray.pos, oc.endpoint);
+				point = intersectRaySegment(c.ray, oc.ray.pos, oc.endpoint);
 			}
 			else if (!c.isRay && oc.isRay){
-				point = intersectRay2Segment(oc.ray, c.ray.pos, c.endpoint);
+				point = intersectRaySegment(oc.ray, c.ray.pos, c.endpoint);
 			}
 			else {
 				point = intersectSegmentSegment(c.ray.pos, c.endpoint, oc.ray.pos, oc.endpoint);
@@ -689,7 +678,7 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 				(!c.isRay && !oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint) && glm::distance(oc.ray.pos, point.point) <= glm::distance(oc.ray.pos, oc.endpoint)));
 			*/
 
-			intersections[cc*(numConstraints-3) + j + cr*numIntersections] = point;
+			intersections[cc*(numConstraints-1) + j + cr*numIntersections] = point;
 			j++;
 		}
 	}
@@ -782,14 +771,15 @@ __global__ void kernUGStartIdxes(int numAgents, int* startIdx, UGEntry* ug_list)
  */
 void ClearPath::stepSimulation(float dt) {
 
+	/*
 	glm::vec3 p1 = glm::vec3(0.0);
 	glm::vec3 p2 = glm::vec3(0.0,1.0,0.0);
 	glm::vec3 p3 = glm::vec3(0.5,0.5,0.0);
 	glm::vec3 p4 = glm::vec3(1.0,0.5,0.0);
 
 	intersection p = intersectSegmentSegment(p1,p2,p3,p4);
-
 	printf("%d: %f %f\n", p.isIntersection, p.point.x, p.point.y);
+	*/
 
 	dim3 fullBlocksPerGrid((numAgents + blockSize - 1) / blockSize);
 
@@ -800,16 +790,13 @@ void ClearPath::stepSimulation(float dt) {
 	numNeighbors = numAgents - 1;
 	numFVOs = numNeighbors;
 	numConstraints = numFVOs * 3; // number of constraints that each robot has to compare
-	numIntersections = numConstraints * (numConstraints - 3); //-3 to remove constraints from the same FVO
+	numIntersections = numConstraints * (numConstraints - 1); //-1 to remove self-constraint
 	
 	totNeighbors = numNeighbors * numAgents;
 	totFVOs = numFVOs * numAgents;
 	totConstraints = numConstraints * numAgents;
 	totIntersections = numIntersections * numAgents;
 
-	printf("num constraints per robot: %d\n", numConstraints);
-	printf("total num constraints: %d\n", totConstraints);
-	printf("num intersections per robot: %d\n", numIntersections);
 	printf("dev intersections: %d\n",totIntersections);
 
 	// Get the number of blocks we need
