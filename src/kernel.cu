@@ -56,7 +56,7 @@ int numFVOs; // total # of FVOs
 int totFVOs;
 int numNeighbors; // Neighbors per agent
 int totNeighbors;
-int numIntersections; // Nnumber of intersection points per agent
+int numIntersections; // Number of intersection points per agent
 int totIntersections;
 int numConstraints; // Number of constraints in the Boundary Edge set per agent
 int totConstraints;
@@ -75,6 +75,9 @@ ray* dev_rays;
 constraint* dev_constraints;
 UGEntry* dev_uglist;
 int* dev_startIdx;
+
+int* dev_min_vel_diff;
+glm::vec3* dev_vel_new;
 
 int* dev_ug_neighbors;
 int* dev_num_neighbors;
@@ -204,13 +207,38 @@ __host__ __device__ glm::vec3 projectPointToLine(glm::vec3 a, glm::vec3 b, glm::
 	glm::vec3 ap = p - a;
 	glm::vec3 ab = b - a;
 
-	return a + glm::dot(ap, ab) / glm::dot(ab, ab) * ab;
+	float t = glm::dot(ap, ab) / glm::dot(ab, ab);
+
+	return a + t * ab;
+}
+
+__host__ __device__ glm::vec3 projectPointToSegment(glm::vec3 a, glm::vec3 b, glm::vec3 p){
+	// A + dot(AP,AB) / dot(AB,AB) * AB
+	// http://gamedev.stackexchange.com/questions/72528/how-can-i-project-a-3d-point-onto-a-3d-line
+
+	glm::vec3 ap = p - a;
+	glm::vec3 ab = b - a;
+
+	float t = glm::dot(ap, ab) / glm::dot(ab, ab);
+
+	if (t < 0.0){
+		return a;
+	}
+	else if (t > 1.0){
+		return b;
+	}
+
+	return a + t * ab;
 }
 
 __host__ __device__ glm::vec3 projectPointToRay(ray a, glm::vec3 p){
-	// http://stackoverflow.com/questions/5227373/minimal-perpendicular-vector-between-a-point-and-a-line
+	// Projects a point to its closest location on a ray.
+	// If the projected point does not lie on the ray, it snaps to the ray origin
+	glm::vec3 ap = p - a.pos;
 
-	return (a.pos + (glm::normalize(p - a.pos))*a.dir);
+	float t = glm::dot(ap, glm::normalize(a.dir));
+
+	return a.pos + a.dir * t * float(t >= 0.0);
 }
 
 __host__ __device__ glm::vec3 intersectPointRay(ray a, glm::vec3 p){
@@ -524,7 +552,6 @@ __global__ void kernCheckInPCR(int N, int numNeighbors, bool* in_pcr, agent* age
 			in_pcr[index] = pointInFVO(fvos[index*numNeighbors + i], agents[index].pos + agents[index].vel);
 		}
 	}
-
 }
 
 __global__ void kernUpdateVelBad(int N, float dt, agent *agents, FVO* fvos, bool* in_pcr){
@@ -811,6 +838,87 @@ __global__ void kernSortIntersectionPoints(int totConstraints, int numAgents, in
 	}
 }
 
+__global__ void kernLabelInsideOutSegments(int totConstraints, int numAgents, int numConstraints, int numIntersections, glm::vec3* vel_new, int* min_vel_diff, intersection* intersections, constraint* constraints, agent* agents){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	if (index < totConstraints){
+		int intersectionPerConstraint = numConstraints - 1;
+		int cr = index / numConstraints;
+		int cc = index % numConstraints;
+
+		glm::vec3 vel_pos_des = agents[cr].pos + agents[cr].vel;
+
+		intersection in;
+		intersection endpoint1 = intersections[cr*numIntersections + cc*intersectionPerConstraint];
+		intersection endpoint2;
+		bool isOutside;
+		bool first = true;
+
+		float old;
+		float dist_new;
+		glm::vec3 vel_pos_new;
+
+		for (int i = 1; i < intersectionPerConstraint; i++){
+			in = intersections[cr*numIntersections + cc*intersectionPerConstraint + i];
+			if (!in.isIntersection) continue;
+			endpoint2 = in;
+
+			if (first && endpoint1.isOutside && endpoint2.isOutside){
+				isOutside = true;
+				first = false;
+			}
+			else if (endpoint1.isOutside && endpoint2.isOutside && !isOutside){
+				isOutside = true;
+			}
+			else{
+				isOutside = false;
+			}
+
+			if (isOutside){
+				vel_pos_new = projectPointToSegment(endpoint1.point, endpoint2.point, vel_pos_des);
+				dist_new = glm::distance(vel_pos_des, vel_pos_new);
+				old = atomicMin(&min_vel_diff[cr], int(dist_new * 10000.0f));
+
+				if (min_vel_diff[cr] == int(dist_new*10000.0f)){
+					vel_new[cr] = vel_pos_new - agents[cr].pos;
+				}
+			}
+
+			endpoint1 = endpoint2;
+		}
+
+		if ((first && endpoint1.isOutside) || (endpoint1.isOutside && !isOutside)){
+			ray cray;
+			cray.pos = endpoint1.point;
+			cray.dir = constraints[index].ray.dir;
+			
+			vel_pos_new = projectPointToRay(cray, vel_pos_des);
+			dist_new = glm::distance(vel_pos_des, vel_pos_new);
+			old = atomicMin(&min_vel_diff[cr], int(dist_new*10000.0f));
+			if (min_vel_diff[cr] == int(dist_new*10000.0f)){
+				vel_new[cr] = vel_pos_new - agents[cr].pos;
+			}
+		}
+	}
+}
+
+__global__ void kernInitMinVelDiff(int numAgents, int* min_vel_diff){
+	int index = (blockDim.x*blockIdx.x) + threadIdx.x;
+
+	if (index < numAgents){
+		min_vel_diff[index] = INT_MAX;
+	}
+}
+
+__global__ void kernUpdateVel(int numAgents, agent* agents, bool* in_pcr, glm::vec3* vel_new){
+	int index = (blockDim.x*blockIdx.x) + threadIdx.x;
+
+	if (index < numAgents){
+		if (in_pcr[index]){
+			agents[index].vel = vel_new[index];
+		}
+	}
+}
 
 /**
  * Step the entire N-body simulation by `dt` seconds.
@@ -847,6 +955,9 @@ void ClearPath::stepSimulation(float dt) {
 	cudaFree(dev_intersections);
 	cudaFree(dev_constraints);
 
+	cudaFree(dev_min_vel_diff);
+	cudaFree(dev_vel_new);
+	
 	// UG
 	/*
 	cudaFree(dev_uglist);
@@ -861,6 +972,9 @@ void ClearPath::stepSimulation(float dt) {
 
 	cudaMalloc((void**)&dev_constraints, totConstraints*sizeof(constraint));
 	cudaMalloc((void**)&dev_intersections, totIntersections*sizeof(intersection));
+
+	cudaMalloc((void**)&dev_min_vel_diff, numAgents*sizeof(int));
+	cudaMalloc((void**)&dev_vel_new, numAgents*sizeof(glm::vec3));
 	
 	// UG
 	/*
@@ -959,11 +1073,20 @@ void ClearPath::stepSimulation(float dt) {
 	// Sort Intersection Points based on distance from endpoint
 	kernSortIntersectionPoints<<<fullBlocksForConstraints, blockSize>>>(totConstraints, numAgents, numConstraints, numIntersections, dev_intersections, dev_constraints);
 
-	// Compute Inside/Outside Line Segments, track the nearest somehow
+	// Compute Inside/Outside Line Segments, track the nearest velocities
+	kernInitMinVelDiff<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_min_vel_diff);
+	kernLabelInsideOutSegments<<<fullBlocksForConstraints, blockSize>>>(totConstraints, numAgents, numConstraints, numIntersections, dev_vel_new, dev_min_vel_diff, dev_intersections, dev_constraints, dev_agents);
+
+	int* hst_min_vel_diff = (int*)malloc(numAgents*sizeof(int));
+	cudaMemcpy(hst_min_vel_diff, dev_min_vel_diff, numAgents*sizeof(int), cudaMemcpyDeviceToHost);
+	for (int i = 0; i < numAgents; i++){
+		printf("%d  ", hst_min_vel_diff[i]);
+	}
 
 	// Update the velocities according to ClearPath
 	//kernUpdateVel2Only<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents, dev_fvos, dev_in_pcr);
 	//kernUpdateVelBad << <fullBlocksPerGrid, blockSize >> >(numAgents, dt, dev_agents, dev_fvos, dev_in_pcr);
+	kernUpdateVel<<<fullBlocksPerGrid,blockSize>>>(numAgents, dev_agents, dev_in_pcr, dev_vel_new);
 
 	// Update the positions
 	kernUpdatePos<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents, dev_pos);

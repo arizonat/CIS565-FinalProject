@@ -130,7 +130,7 @@ bool init(int argc, char **argv) {
 	hst_agents = (ClearPath::agent*)malloc(N_FOR_VIS*sizeof(ClearPath::agent));
 	
 	tot_num_intersections = (N_FOR_VIS - 1) * 3 * ((N_FOR_VIS - 1) * 3 - 1) * N_FOR_VIS;
-	printf("hst intersections: %d\n", tot_num_intersections);
+	//printf("hst intersections: %d\n", tot_num_intersections);
 	hst_intersections = (ClearPath::intersection*)malloc(tot_num_intersections*sizeof(ClearPath::intersection));
 	
 	hst_neighbors = (int*)malloc(N_FOR_VIS*(N_FOR_VIS-1)*sizeof(int));
@@ -302,7 +302,7 @@ void mainLoop() {
 		glColor3f(0.0,1.0,0.0);
 		for (int i = 0; i < tot_num_intersections/N_FOR_VIS; i++){
 			if (hst_intersections[i].isIntersection){
-				printf("%f  \n", hst_intersections[i].distToOrigin);
+				//printf("%f  \n", hst_intersections[i].distToOrigin);
 				if (hst_intersections[i].isOutside){
 					glColor3f(0.0, 1.0, 0.0);
 				}
