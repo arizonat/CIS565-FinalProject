@@ -14,7 +14,7 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 4;
+const int N_FOR_VIS = 3;
 const float DT = 0.005f; //TODO: originally 0.2
 
 glm::vec3* hst_pos;
@@ -302,6 +302,14 @@ void mainLoop() {
 		glColor3f(0.0,1.0,0.0);
 		for (int i = 0; i < tot_num_intersections/N_FOR_VIS; i++){
 			if (hst_intersections[i].isIntersection){
+
+				if (hst_intersections[i].isOutside){
+					glColor3f(0.0, 1.0, 0.0);
+				}
+				else {
+					glColor3f(0.0, 1.0, 1.0);
+				}
+
 				glVertex2f(hst_intersections[i].point.x - 0.5, hst_intersections[i].point.y - 0.5);
 				glVertex2f(hst_intersections[i].point.x + 0.5f, hst_intersections[i].point.y + 0.5f);
 				glVertex2f(hst_intersections[i].point.x - 0.5, hst_intersections[i].point.y + 0.5);

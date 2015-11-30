@@ -2,6 +2,7 @@
 #include <thrust/sort.h>
 #include <thrust/device_ptr.h>
 #include <thrust/device_vector.h>
+#include <thrust/execution_policy.h>
 #include <stdio.h>
 #include <cuda.h>
 #include <cmath>
@@ -234,9 +235,14 @@ __host__ __device__ bool pointInFVO(FVO fvo, glm::vec3 p){
 	// True if point is inside FVO, false otherwise (on border means it is NOT inside the FVO)
 	// Basically check to see if all constraints are satisfied
 
-	int fvol_sat = sidePointSegment(fvo.L.ray, p); // should be negative
-	int fvor_sat = sidePointSegment(fvo.R.ray, p); // should be positive
-	int fvot_sat = sidePointSegment(fvo.T.ray, p); // should be positive
+	// Allow some wiggle room?
+	glm::vec3 pl = p - (fvo.L.norm)*0.0001f;
+	glm::vec3 pr = p - (fvo.R.norm)*0.0001f;
+	glm::vec3 pt = p - (fvo.T.norm)*0.0001f;
+
+	int fvol_sat = sidePointSegment(fvo.L.ray, pl); // should be negative
+	int fvor_sat = sidePointSegment(fvo.R.ray, pr); // should be positive
+	int fvot_sat = sidePointSegment(fvo.T.ray, pt); // should be positive
 
 	return (fvol_sat < 0) && (fvor_sat > 0) && (fvot_sat > 0);
 }
@@ -287,20 +293,22 @@ __host__ __device__ FVO computeFVO(agent A, agent B){
 
 	L.ray.pos = T.ray.pos;
 	L.ray.dir = glm::normalize(rotatedL);
-	ray pABl;
-	pABl.pos = apex;
-	pABl.dir = L.ray.dir;
-	L.norm = glm::normalize(intersectPointRay(pABl, B.pos));
+	//ray pABl;
+	//pABl.pos = apex;
+	//pABl.dir = L.ray.dir;
+	//L.norm = glm::normalize(intersectPointRay(pABl, B.pos));
+	L.norm = glm::normalize(glm::cross(L.ray.dir, glm::vec3(0.0,0.0,1.0)));
 
 	// Compute FVO_R
 	glm::vec3 rotatedR = glm::rotateZ(pAB, -theta);
 
 	R.ray.pos = M + glm::normalize(pABp)*n;
 	R.ray.dir = glm::normalize(rotatedR);
-	ray pABr;
-	pABr.pos = apex;
-	pABr.dir = R.ray.dir;
-	R.norm = glm::normalize(intersectPointRay(pABr, B.pos));
+	//ray pABr;
+	//pABr.pos = apex;
+	//pABr.dir = R.ray.dir;
+	//R.norm = glm::normalize(intersectPointRay(pABr, B.pos));
+	R.norm = glm::normalize(glm::cross(R.ray.dir, glm::vec3(0.0, 0.0, -1.0)));
 
 	L.isRay = true;
 	T.endpoint = R.ray.pos;
@@ -765,21 +773,47 @@ __global__ void kernUGStartIdxes(int numAgents, int* startIdx, UGEntry* ug_list)
 	}
 }
 
+__global__ void kernLabelInsideOutIntersections(int totIntersections, int numIntersections, int numAgents, int numFVOs, intersection* intersections, FVO* fvos){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	if (index < totIntersections){
+		int ir = index / numIntersections;
+		int ic = index % numIntersections;
+
+		if (!intersections[index].isIntersection){
+			return;
+		}
+
+		bool isOutside = true;
+
+		//TODO: can we prevent ourselves from checking against our own FVO?
+		for (int i = 0; i < numFVOs; i++){
+			if (pointInFVO(fvos[ir*numFVOs + i], intersections[index].point)){
+				isOutside = false;
+				break;
+			}
+		}
+		intersections[index].isOutside = isOutside;
+	}
+}
+
+__global__ void kernSortIntersectionPoints(int totConstraints, int numAgents, int numConstraints, int numIntersections, intersection* intersections, constraint* constraints){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+	
+	if (index < totConstraints){
+		int intersectionPerConstraint = numConstraints - 1;
+		int cr = index / numConstraints;
+		int cc = index % numConstraints;
+
+		//thrust::sort(thrust::seq,,);
+	}
+}
+
 
 /**
  * Step the entire N-body simulation by `dt` seconds.
  */
 void ClearPath::stepSimulation(float dt) {
-
-	/*
-	glm::vec3 p1 = glm::vec3(0.0);
-	glm::vec3 p2 = glm::vec3(0.0,1.0,0.0);
-	glm::vec3 p3 = glm::vec3(0.5,0.5,0.0);
-	glm::vec3 p4 = glm::vec3(1.0,0.5,0.0);
-
-	intersection p = intersectSegmentSegment(p1,p2,p3,p4);
-	printf("%d: %f %f\n", p.isIntersection, p.point.x, p.point.y);
-	*/
 
 	dim3 fullBlocksPerGrid((numAgents + blockSize - 1) / blockSize);
 
@@ -803,6 +837,7 @@ void ClearPath::stepSimulation(float dt) {
 	dim3 fullBlocksForFVOs((totFVOs + blockSize - 1) / blockSize);
 	dim3 fullBlocksForConstraints((totConstraints + blockSize - 1) / blockSize);
 	dim3 fullBlocksForUG((GRIDMAX*GRIDMAX + blockSize - 1) / blockSize);
+	dim3 fullBlocksForIntersections((totIntersections + blockSize - 1) / blockSize);
 
 	// Free everything
 	cudaFree(dev_neighbors);
@@ -922,10 +957,12 @@ void ClearPath::stepSimulation(float dt) {
 		}
 	}
 
-
 	// Compute Inside/Outside Points
+	// TODO: Need to do compaction on these
+	kernLabelInsideOutIntersections<<<fullBlocksForIntersections, blockSize>>>(totIntersections, numIntersections, numAgents, numFVOs, dev_intersections, dev_fvos);
 
 	// Sort Intersection Points based on distance from endpoint
+	kernSortIntersectionPoints<<<fullBlocksForConstraints, blockSize>>>(totConstraints, numAgents, numConstraints, numIntersections, dev_intersections, dev_constraints);
 
 	// Compute Inside/Outside Line Segments, track the nearest somehow
 
