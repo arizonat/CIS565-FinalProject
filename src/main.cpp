@@ -302,7 +302,7 @@ void mainLoop() {
 		glColor3f(0.0,1.0,0.0);
 		for (int i = 0; i < tot_num_intersections/N_FOR_VIS; i++){
 			if (hst_intersections[i].isIntersection){
-
+				printf("%f  \n", hst_intersections[i].distToOrigin);
 				if (hst_intersections[i].isOutside){
 					glColor3f(0.0, 1.0, 0.0);
 				}
@@ -318,6 +318,7 @@ void mainLoop() {
 				glVertex2f(hst_intersections[i].point.x, hst_intersections[i].point.y + 0.5f);
 			}
 		}
+		printf("\n");
 
 		glEnd();
         glUseProgram(0);

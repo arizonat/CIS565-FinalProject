@@ -53,12 +53,19 @@ namespace ClearPath {
 		glm::vec3 point;
 		bool isOutside;
 		bool isIntersection;
+		float distToOrigin; // Distance to the constraint origin
 		//float distToRayOrigin;
 	};
 
 	struct UGComp{
 		__host__ __device__ bool operator()(const UGEntry &a, const UGEntry &b){
 			return a.cellId < b.cellId;
+		}
+	};
+
+	struct DistToOriginComp{
+		__host__ __device__ bool operator()(const intersection &a, const intersection &b){
+			return a.distToOrigin < b.distToOrigin;
 		}
 	};
 

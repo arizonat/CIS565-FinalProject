@@ -618,6 +618,7 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 		// My own startpoint is an intersection of this constraint
 		point.point = c.ray.pos;
 		point.isIntersection = true;
+		point.distToOrigin = 0.0f;
 		intersections[cc*(numConstraints - 1) + j + cr*numIntersections] = point;
 		j++;
 
@@ -625,6 +626,7 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 		if (!c.isRay){
 			point.point = c.endpoint;
 			point.isIntersection = true;
+			point.distToOrigin = glm::distance(point.point, c.ray.pos);
 			intersections[cc*(numConstraints - 1) + j + cr*numIntersections] = point;
 			j++;
 		}
@@ -655,7 +657,7 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 								   (!c.isRay && oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint)) ||
 								   (!c.isRay && !oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint) && glm::distance(oc.ray.pos, point.point) <= glm::distance(oc.ray.pos, oc.endpoint)));
 			*/
-
+			point.distToOrigin = glm::distance(point.point, c.ray.pos);
 			intersections[cc*(numConstraints-1) + j + cr*numIntersections] = point;
 			j++;
 		}
@@ -685,7 +687,7 @@ __global__ void kernFindIntersections(int totConstraints, int numAgents, int num
 				(!c.isRay && oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint)) ||
 				(!c.isRay && !oc.isRay && glm::distance(c.ray.pos, point.point) <= glm::distance(c.ray.pos, c.endpoint) && glm::distance(oc.ray.pos, point.point) <= glm::distance(oc.ray.pos, oc.endpoint)));
 			*/
-
+			point.distToOrigin = glm::distance(point.point, c.ray.pos);
 			intersections[cc*(numConstraints-1) + j + cr*numIntersections] = point;
 			j++;
 		}
@@ -805,7 +807,7 @@ __global__ void kernSortIntersectionPoints(int totConstraints, int numAgents, in
 		int cr = index / numConstraints;
 		int cc = index % numConstraints;
 
-		//thrust::sort(thrust::seq,,);
+		thrust::sort(thrust::seq, &intersections[cr*numIntersections + cc*intersectionPerConstraint], &intersections[cr*numIntersections + cc*intersectionPerConstraint] + intersectionPerConstraint, DistToOriginComp());
 	}
 }
 
@@ -830,8 +832,6 @@ void ClearPath::stepSimulation(float dt) {
 	totFVOs = numFVOs * numAgents;
 	totConstraints = numConstraints * numAgents;
 	totIntersections = numIntersections * numAgents;
-
-	printf("dev intersections: %d\n",totIntersections);
 
 	// Get the number of blocks we need
 	dim3 fullBlocksForFVOs((totFVOs + blockSize - 1) / blockSize);
@@ -950,12 +950,7 @@ void ClearPath::stepSimulation(float dt) {
 
 	intersection* hst_intersection = (intersection*)malloc(totIntersections*sizeof(intersection));
 	cudaMemcpy(hst_intersection, dev_intersections, totIntersections*sizeof(intersection), cudaMemcpyDeviceToHost);
-
-	for (int i = 0; i < numIntersections; i++){
-		if (hst_intersection[i].isIntersection){
-			printf("%d  ",i);
-		}
-	}
+	free(hst_intersection);
 
 	// Compute Inside/Outside Points
 	// TODO: Need to do compaction on these
