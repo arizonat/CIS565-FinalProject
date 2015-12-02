@@ -14,7 +14,7 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 3;
+const int N_FOR_VIS = 2;
 const float DT = 0.005f; //TODO: originally 0.2
 
 glm::vec3* hst_pos;
@@ -29,7 +29,7 @@ int tot_num_intersections;
  * C main function.
  */
 int main(int argc, char* argv[]) {
-    projectName = "565 CUDA Intro: N-Body";
+    projectName = "565 Final: P-ClearPath";
 
     if (init(argc, argv)) {
         mainLoop();
