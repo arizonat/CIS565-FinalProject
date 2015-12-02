@@ -873,9 +873,9 @@ __global__ void kernLabelInsideOutSegments(int totConstraints, int numAgents, in
 		int cr = index / numConstraints;
 		int cc = index % numConstraints;
 
-		if (cc % 3 == 1){
-			return;
-		}
+		//if (cc % 3 == 1){
+		//	return;
+		//}
 
 		glm::vec3 vel_pos_des = agents[cr].pos + agents[cr].vel;
 
