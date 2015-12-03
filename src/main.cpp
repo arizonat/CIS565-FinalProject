@@ -14,7 +14,7 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 2;
+const int N_FOR_VIS = 6;
 const float DT = 0.005f; //TODO: originally 0.2
 
 glm::vec3* hst_pos;
@@ -24,6 +24,8 @@ ClearPath::agent* hst_agents;
 int* hst_neighbors;
 int* hst_num_neighbors;
 int tot_num_intersections;
+
+int iter;
 
 /**
  * C main function.
@@ -136,6 +138,8 @@ bool init(int argc, char **argv) {
 	hst_neighbors = (int*)malloc(N_FOR_VIS*(N_FOR_VIS-1)*sizeof(int));
 	hst_num_neighbors = (int*)malloc(N_FOR_VIS*sizeof(int));
 
+	iter = 0;
+
     return true;
 }
 
@@ -221,7 +225,8 @@ void runCUDA() {
     cudaGLMapBufferObject((void**)&dptrvert, planetVBO);
 
     // execute the kernel
-    ClearPath::stepSimulation(DT);
+    ClearPath::stepSimulation(DT, iter);
+	iter++;
 #if VISUALIZE
     ClearPath::copyAgentsToVBO(dptrvert, hst_endpoints, hst_pos, hst_agents, hst_intersections, hst_neighbors, hst_num_neighbors);
 #endif
@@ -299,6 +304,7 @@ void mainLoop() {
 		}
 
 		// Draw intersection points
+		/*
 		glColor3f(0.0,1.0,0.0);
 		for (int i = 0; i < tot_num_intersections/N_FOR_VIS; i++){
 			if (hst_intersections[i].isIntersection){
@@ -319,6 +325,7 @@ void mainLoop() {
 			}
 		}
 		printf("\n");
+		*/
 
 		glEnd();
         glUseProgram(0);

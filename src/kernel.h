@@ -23,6 +23,7 @@ namespace ClearPath {
 		glm::vec3 goal;
 		float radius;
 		int id;
+		float w;
 	};
 
 	struct ray{
@@ -70,6 +71,6 @@ namespace ClearPath {
 	};
 
 	void initSimulation(int N);
-	void stepSimulation(float dt);
+	void stepSimulation(float dt, int iter);
 	void copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos, agent* agents, intersection* intersections, int* neighbors, int* num_neighbors);
 }

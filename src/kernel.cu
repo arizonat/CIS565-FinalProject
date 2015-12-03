@@ -9,6 +9,8 @@
 #include <math.h>
 #include <glm/glm.hpp>
 #include <glm/gtx/rotate_vector.hpp>
+#include <glm/gtx/intersect.hpp>
+#include <glm/gtc/constants.hpp>
 #include "utilityCore.hpp"
 #include "kernel.h"
 //#include <vector>
@@ -16,6 +18,9 @@
 #define checkCUDAErrorWithLine(msg) checkCUDAError(msg, __LINE__)
 
 #define sign(x) (x>0)-(x<0)
+
+//#define INFINITY 0x7f800000
+#define NEG_INFINITY 0xff800000
 
 using namespace ClearPath;
 
@@ -40,11 +45,15 @@ void checkCUDAError(const char *msg, int line = -1) {
 /*! Block size used for CUDA kernel launch. */
 #define blockSize 128
 #define robot_radius 0.5
-#define circle_radius 6
+#define circle_radius 5
 #define desired_speed 3.0f
 
 #define GRIDMAX 20 // Must be even, creates grid of GRIDMAX x GRIDMAX size
 #define NNRADIUS 2.0f
+
+// Experimental sampling
+#define NUM_SAMPLES 250
+#define MAX_VEL 3.0f
 
 /***********************************************
 * Kernel state (pointers are device pointers) *
@@ -60,6 +69,8 @@ int numIntersections; // Number of intersection points per agent
 int totIntersections;
 int numConstraints; // Number of constraints in the Boundary Edge set per agent
 int totConstraints;
+
+int totSamples;
 
 dim3 threadsPerBlock(blockSize);
 
@@ -84,6 +95,10 @@ int* dev_num_neighbors;
 
 glm::vec3* dev_closest_points;
 intersection* dev_intersections;
+
+// Experimental sampling
+glm::vec3* dev_sample_vels;
+float* dev_scores;
 
 /*******************
 * Uniform Grid Functions *
@@ -126,6 +141,46 @@ __global__ void kernUpdateUniformGrid(int numAgents, UGEntry* uglist, agent* age
 /*******************
 * Helper functions *
 ********************/
+
+__host__ __device__ bool intersectRaySphere(glm::vec3 rayStarting, glm::vec3 rayNormalizedDirection, glm::vec3 sphereCenter, float radius2, float& distance){
+	float eps = 0.000001f;
+
+	glm::vec3 diff = sphereCenter - rayStarting;
+	float t0 = glm::dot(diff, rayNormalizedDirection);
+	float dSquared = glm::dot(diff, diff) - t0 * t0;
+	if (dSquared > radius2)
+	{
+		return false;
+	}
+	float t1 = sqrt(radius2 - dSquared);
+	distance = t0 > t1 + eps ? t0 - t1 : t0 + t1;
+	return distance > eps;
+}
+
+/*
+template <typename genType>
+GLM_FUNC_QUALIFIER bool intersectRaySphere
+(
+genType const & rayStarting, genType const & rayNormalizedDirection,
+genType const & sphereCenter, const typename genType::value_type sphereRadiusSquered,
+typename genType::value_type & intersectionDistance
+)
+{
+	//typename genType::value_type Epsilon = std::numeric_limits<typename genType::value_type>::epsilon();
+	typename genType::value_type Epsilon = std::numeric_limits<typename genType::value_type>::epsilon();
+	genType diff = sphereCenter - rayStarting;
+	typename genType::value_type t0 = dot(diff, rayNormalizedDirection);
+	typename genType::value_type dSquared = dot(diff, diff) - t0 * t0;
+	if (dSquared > sphereRadiusSquered)
+	{
+		return false;
+	}
+	typename genType::value_type t1 = sqrt(sphereRadiusSquered - dSquared);
+	intersectionDistance = t0 > t1 + Epsilon ? t0 - t1 : t0 + t1;
+	return intersectionDistance > Epsilon;
+}
+*/
+
 
 // Computes the intersection between 2 rays
 // point is the intersection, bool returns true if there is an intersection, false otherwise
@@ -374,6 +429,17 @@ __host__ __device__ glm::vec3 generateRandomVec3(float time, int index) {
     return glm::vec3((float)unitDistrib(rng), (float)unitDistrib(rng), (float)unitDistrib(rng));
 }
 
+
+__host__ __device__ glm::vec3 sampleRandom2DVelocity(float time, int index){
+	thrust::default_random_engine rng(hash((int)(index * time)));
+	thrust::uniform_real_distribution<float> unitDistrib(0, 1);
+
+	float theta = 2.0f*3.1415629f*(float)unitDistrib(rng);
+	float r = glm::sqrt((float)unitDistrib(rng));
+
+	return glm::vec3((r*MAX_VEL)*glm::cos(theta), (r*MAX_VEL)*glm::sin(theta), 0.0);
+}
+
 __global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
@@ -384,6 +450,8 @@ __global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
 		//	rad -= 7.0*3.1415f / 8.0f;
 		//}
 
+		//agents[index].w = 1.0f / float(index);
+		agents[index].w = 1.0f;
 		agents[index].pos.x = scale * circle_radius * cos(rad);
 		agents[index].pos.y = scale * circle_radius * sin(rad);
 		agents[index].pos.z = 0.0;
@@ -577,6 +645,7 @@ __global__ void kernCheckInPCR(int N, int numNeighbors, bool* in_pcr, agent* age
 		//int numNeighbors = N - 1;
 		for (int i = 0; i < numNeighbors; i++){
 			in_pcr[index] = pointInFVO(fvos[index*numNeighbors + i], agents[index].pos + agents[index].vel);
+			in_pcr[index] = true;
 		}
 	}
 }
@@ -951,35 +1020,90 @@ __global__ void kernUpdateVel(int numAgents, agent* agents, bool* in_pcr, glm::v
 	}
 }
 
-typedef long int32;
-typedef unsigned long uint32;
+__global__ void kernSampleVelocities(int totSamples, float time, glm::vec3* sample_vels){
+	// totSamples = numAgents * samplesPerAgent
+	int index = (blockDim.x*blockIdx.x) + threadIdx.x;
 
-static inline uint32 FloatFlip(uint32 f)
-{
-	uint32 mask = -int32(f >> 31) | 0x80000000;
-	return f ^ mask;
+	if (index < totSamples){
+		sample_vels[index] = sampleRandom2DVelocity(time, index);
+	}
 }
 
-static inline uint32 IFloatFlip(uint32 f)
-{
-	uint32 mask = ((f >> 31) - 1) | 0x80000000;
-	return f ^ mask;
+__global__ void kernScoreSamples(int totSamples, int numAgents, int samplesPerAgent, float* scores, glm::vec3* sample_vels, agent* agents){
+	int index = (blockDim.x*blockIdx.x) + threadIdx.x;
+
+	if (index < totSamples){
+		int sr = index / samplesPerAgent;
+		int sc = index % samplesPerAgent;
+
+		float wi = 1.0f;
+		wi = agents[sr].w;
+
+		float tc = INFINITY;
+		float tci;
+
+		glm::vec3 pA, pB, vA, vB, vABp;
+		float t;
+		bool intersects;
+		float radius2;
+
+		// Get time to collision
+		for (int i = 0; i < numAgents; i++){
+			if (i == sr) continue;
+
+			pA = agents[sr].pos;
+			vA = agents[sr].vel;
+			vB = agents[i].vel;
+			pB = agents[i].pos;
+			vABp = 2.0f*sample_vels[index] - vA - vB;
+			radius2 = (agents[i].radius + agents[sr].radius)*(agents[i].radius + agents[sr].radius);
+			//intersects = glm::intersectRaySphere(pA, glm::normalize(vABp), pB, radius2, t);
+			intersects = intersectRaySphere(pA, glm::normalize(vABp), pB, radius2, t);
+
+			if (intersects && t < tc){
+				tc = t;
+			}
+		}
+
+		// Compute score
+		if (tc != INFINITY){
+			scores[index] = wi * (1.0 / tc) + glm::length(agents[sr].vel-sample_vels[index]);
+		}
+		else {
+			scores[index] = glm::length(agents[sr].vel - sample_vels[index]);
+		}
+	}
+}
+
+__global__ void kernSelectVel(int numAgents, int samplesPerAgent, float* scores, glm::vec3* sample_vels, agent* agents, bool* in_pcr){
+	int index = (blockDim.x*blockIdx.x) + threadIdx.x;
+
+	if (index < numAgents && in_pcr[index]){
+		float score = INFINITY;
+		for (int i = 0; i < samplesPerAgent; i++){
+			if (scores[i + index*samplesPerAgent] < score){
+				score = scores[i + index*samplesPerAgent];
+				agents[index].vel = sample_vels[i + index*samplesPerAgent];
+			}
+		}
+	}
 }
 
 /**
  * Step the entire N-body simulation by `dt` seconds.
  */
-void ClearPath::stepSimulation(float dt) {
+void ClearPath::stepSimulation(float dt, int iter) {
 
-	//uint32 ux = FloatFlip((uint32&)x);
-	//uint32 ux1 = FloatFlip((uint32&)x1);
-	//uint32 ux2 = FloatFlip((uint32&)x2);
+	/*
+	ray a;
+	a.pos = glm::vec3(0.0);
+	a.dir = glm::vec3(1.0,0.0,0.0);
+	float t;
+	glm::vec3 inter;
+	bool isinter = glm::intersectRaySphere(a.pos, a.dir, glm::vec3(4.0, 0.0, 0.0), 4.0f, t);
 
-	//x = (float)IFloatFlip(ux);
-	//x1 = (float)IFloatFlip(ux1);
-	//x2 = (float)IFloatFlip(ux2);
-
-	//printf("%f %f %f",x,x1,x2);
+	printf("%d -- %f:  %f %f %f", isinter, t, inter.x, inter.y, inter.z);
+	*/
 
 	dim3 fullBlocksPerGrid((numAgents + blockSize - 1) / blockSize);
 
@@ -997,11 +1121,14 @@ void ClearPath::stepSimulation(float dt) {
 	totConstraints = numConstraints * numAgents;
 	totIntersections = numIntersections * numAgents;
 
+	totSamples = numAgents * NUM_SAMPLES;
+
 	// Get the number of blocks we need
 	dim3 fullBlocksForFVOs((totFVOs + blockSize - 1) / blockSize);
 	dim3 fullBlocksForConstraints((totConstraints + blockSize - 1) / blockSize);
 	dim3 fullBlocksForUG((GRIDMAX*GRIDMAX + blockSize - 1) / blockSize);
 	dim3 fullBlocksForIntersections((totIntersections + blockSize - 1) / blockSize);
+	dim3 fullBlocksForSamples((totSamples + blockSize - 1) / blockSize);
 
 	// Free everything
 	cudaFree(dev_neighbors);
@@ -1013,6 +1140,9 @@ void ClearPath::stepSimulation(float dt) {
 
 	cudaFree(dev_min_vel_diff);
 	cudaFree(dev_vel_new);
+
+	cudaFree(dev_sample_vels);
+	cudaFree(dev_scores);
 	
 	// UG
 	cudaFree(dev_uglist);
@@ -1035,6 +1165,9 @@ void ClearPath::stepSimulation(float dt) {
 	cudaMalloc((void**)&dev_startIdx, GRIDMAX*GRIDMAX*sizeof(int));
 	cudaMalloc((void**)&dev_ug_neighbors, numNeighbors*numAgents*sizeof(int));
 	cudaMalloc((void**)&dev_num_neighbors, numAgents*sizeof(int));
+
+	cudaMalloc((void**)&dev_sample_vels, totSamples*sizeof(glm::vec3));
+	cudaMalloc((void**)&dev_scores, totSamples*sizeof(float));
 	
 	// TODO: this should actually be a kernel initialization
 	cudaMemset(dev_in_pcr, false, numAgents*sizeof(bool));
@@ -1122,15 +1255,16 @@ void ClearPath::stepSimulation(float dt) {
 
 	// Compute Inside/Outside Points
 	// TODO: Need to do compaction on these
-	kernLabelInsideOutIntersections<<<fullBlocksForIntersections, blockSize>>>(totIntersections, numIntersections, numAgents, numFVOs, dev_intersections, dev_fvos);
+	//kernLabelInsideOutIntersections<<<fullBlocksForIntersections, blockSize>>>(totIntersections, numIntersections, numAgents, numFVOs, dev_intersections, dev_fvos);
 
 	// Sort Intersection Points based on distance from endpoint
-	kernSortIntersectionPoints<<<fullBlocksForConstraints, blockSize>>>(totConstraints, numAgents, numConstraints, numIntersections, dev_intersections, dev_constraints);
+	//kernSortIntersectionPoints<<<fullBlocksForConstraints, blockSize>>>(totConstraints, numAgents, numConstraints, numIntersections, dev_intersections, dev_constraints);
 
 	// Compute Inside/Outside Line Segments, track the nearest velocities
-	kernInitMinVelDiff<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_min_vel_diff);
-	kernLabelInsideOutSegments<<<fullBlocksForConstraints, blockSize>>>(totConstraints, numAgents, numConstraints, numIntersections, dev_vel_new, dev_min_vel_diff, dev_intersections, dev_constraints, dev_agents);
+	//kernInitMinVelDiff<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_min_vel_diff);
+	//kernLabelInsideOutSegments<<<fullBlocksForConstraints, blockSize>>>(totConstraints, numAgents, numConstraints, numIntersections, dev_vel_new, dev_min_vel_diff, dev_intersections, dev_constraints, dev_agents);
 
+	/*
 	int* hst_min_vel_diff = (int*)malloc(numAgents*sizeof(int));
 	printf("Minimum velocity difference: ");
 	cudaMemcpy(hst_min_vel_diff, dev_min_vel_diff, numAgents*sizeof(int), cudaMemcpyDeviceToHost);
@@ -1138,11 +1272,18 @@ void ClearPath::stepSimulation(float dt) {
 		printf("%d ", hst_min_vel_diff[i]);
 	}
 	printf("\n");
+	*/
 
 	// Update the velocities according to ClearPath
 	//kernUpdateVel2Only<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents, dev_fvos, dev_in_pcr);
 	//kernUpdateVelBad << <fullBlocksPerGrid, blockSize >> >(numAgents, dt, dev_agents, dev_fvos, dev_in_pcr);
-	kernUpdateVel<<<fullBlocksPerGrid,blockSize>>>(numAgents, dev_agents, dev_in_pcr, dev_vel_new);
+	//kernUpdateVel<<<fullBlocksPerGrid,blockSize>>>(numAgents, dev_agents, dev_in_pcr, dev_vel_new);
+
+	kernSampleVelocities<<<fullBlocksForSamples, blockSize>>>(totSamples, iter+1, dev_sample_vels);
+
+	kernScoreSamples<<<fullBlocksForSamples, blockSize>>>(totSamples, numAgents, NUM_SAMPLES, dev_scores, dev_sample_vels, dev_agents);
+
+	kernSelectVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, NUM_SAMPLES, dev_scores, dev_sample_vels, dev_agents, dev_in_pcr);
 
 	agent* hst_agents = (agent*)malloc(numAgents*sizeof(agent));
 	cudaMemcpy(hst_agents, dev_agents, numAgents*sizeof(agent), cudaMemcpyDeviceToHost);
