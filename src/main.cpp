@@ -14,16 +14,21 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 6;
+const int N_FOR_VIS = 2;
 const float DT = 0.005f; //TODO: originally 0.2
 
 glm::vec3* hst_pos;
 ClearPath::intersection* hst_intersections;
 ClearPath::segment* hst_segments;
 ClearPath::agent* hst_agents;
+ClearPath::HRVO* hst_hrvos;
+ClearPath::CandidateVel* hst_candidates;
+
 int* hst_neighbors;
 int* hst_num_neighbors;
 int tot_num_intersections;
+int tot_num_hrvos;
+int tot_num_candidates;
 
 int iter;
 
@@ -138,6 +143,11 @@ bool init(int argc, char **argv) {
 	hst_neighbors = (int*)malloc(N_FOR_VIS*(N_FOR_VIS-1)*sizeof(int));
 	hst_num_neighbors = (int*)malloc(N_FOR_VIS*sizeof(int));
 
+	tot_num_hrvos = (N_FOR_VIS - 1)*N_FOR_VIS;
+	hst_hrvos = (ClearPath::HRVO*)malloc(tot_num_hrvos*sizeof(ClearPath::HRVO));
+	tot_num_candidates = N_FOR_VIS*(2 * (N_FOR_VIS - 1) + 4 * (N_FOR_VIS - 1)*(N_FOR_VIS - 2));
+	hst_candidates = (ClearPath::CandidateVel*)malloc(tot_num_candidates*sizeof(ClearPath::CandidateVel));
+
 	iter = 0;
 
     return true;
@@ -228,7 +238,7 @@ void runCUDA() {
     ClearPath::stepSimulation(DT, iter);
 	iter++;
 #if VISUALIZE
-    ClearPath::copyAgentsToVBO(dptrvert, hst_endpoints, hst_pos, hst_agents, hst_intersections, hst_neighbors, hst_num_neighbors);
+    ClearPath::copyAgentsToVBO(dptrvert, hst_endpoints, hst_pos, hst_agents, hst_hrvos, hst_candidates, hst_intersections, hst_neighbors, hst_num_neighbors);
 #endif
     // unmap buffer object
     cudaGLUnmapBufferObject(planetVBO);
@@ -282,9 +292,20 @@ void mainLoop() {
 		glVertex2f(hst_pos[0].x+2, hst_pos[0].y+2);
 		
 		// Draw FVOs
+		/*
 		for (int i = 0; i < 6*(N_FOR_VIS-1); i++){
 			glVertex2f(hst_endpoints[i].x, hst_endpoints[i].y);
 			//printf("%f, %f\n",hst_endpoints[i].x,hst_endpoints[i].y);
+		}
+		*/
+
+		// Draw HRVOs
+		for (int i = 0; i < N_FOR_VIS - 1; i++){
+			glm::vec3 apex = hst_agents[0].pos + hst_hrvos[i].apex;
+			glVertex2f(apex.x, apex.y);
+			glVertex2f(apex.x + 5.0*hst_hrvos[i].left.x, apex.y + 5.0*hst_hrvos[i].left.y);
+			glVertex2f(apex.x, apex.y);
+			glVertex2f(apex.x + 5.0*hst_hrvos[i].right.x, apex.y + 5.0*hst_hrvos[i].right.y);
 		}
 
 		// Draw velocity vectors
@@ -300,7 +321,30 @@ void mainLoop() {
 			int n = hst_neighbors[i];
 			glVertex2f(hst_agents[n].pos.x, hst_agents[n].pos.y);
 			glVertex2f(hst_agents[n].pos.x+1, hst_agents[n].pos.y+1);
+		}
 
+		// Draw Candidates
+		glColor3f(0.0, 1.0, 0.0);
+		for (int i = 0; i < tot_num_candidates / N_FOR_VIS; i++){
+			ClearPath::CandidateVel can = hst_candidates[i];
+			glm::vec3 p = hst_agents[0].pos + can.vel;
+
+			if (can.valid){
+				//printf("%f  \n", hst_intersections[i].distToOrigin);
+				//if (hst_intersections[i].isOutside){
+				//	glColor3f(0.0, 1.0, 0.0);
+				//}
+				//else {
+				//	glColor3f(0.0, 1.0, 1.0);
+				//}
+
+				glVertex2f(p.x - 0.5, p.y - 0.5);
+				glVertex2f(p.x + 0.5f, p.y + 0.5f);
+				glVertex2f(p.x - 0.5, p.y + 0.5);
+				glVertex2f(p.x + 0.5f, p.y - 0.5f);
+				glVertex2f(p.x, p.y - 0.5);
+				glVertex2f(p.x, p.y + 0.5f);
+			}
 		}
 
 		// Draw intersection points

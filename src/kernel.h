@@ -7,6 +7,20 @@
 
 namespace ClearPath {
 
+	struct HRVO{
+		glm::vec3 apex;
+		glm::vec3 left;
+		glm::vec3 right;
+	};
+
+	struct CandidateVel{
+		glm::vec3 vel;
+		bool valid;
+		float distToPref;
+		int hrvo1;
+		int hrvo2;
+	};
+
 	struct Cell{
 		int x;
 		int y;
@@ -70,7 +84,8 @@ namespace ClearPath {
 		}
 	};
 
+
 	void initSimulation(int N);
 	void stepSimulation(float dt, int iter);
-	void copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos, agent* agents, intersection* intersections, int* neighbors, int* num_neighbors);
+	void copyAgentsToVBO(float *vbodptr, glm::vec2* endpoints, glm::vec3* pos, agent* agents, HRVO* hrvos, CandidateVel* candidates, intersection* intersections, int* neighbors, int* num_neighbors);
 }
