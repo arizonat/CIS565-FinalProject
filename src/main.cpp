@@ -14,8 +14,8 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 8;
-const float DT = 0.005f; //TODO: originally 0.2
+const int N_FOR_VIS = 35;
+const float DT = 0.005f; //TODO: 0.02 works for 30 robots
 
 glm::vec3* hst_pos;
 ClearPath::agent* hst_agents;

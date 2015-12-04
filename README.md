@@ -1,5 +1,9 @@
 ﻿CIS565 Fall 2015 - Final Project
 
+HRVO using ClearPath on CUDA
+
+NOTE: Intersection computation is heavily borrowed from the original HRVO implementation (from Snape: https://github.com/snape/HRVO)
+
 
 For my final project I am planning to implement the P-ClearPath algorithm for collision avoidance for multi-agent systems. In robotics, collision avoidance is especially important, since we use very expensive yet very fragile equipment (oh the curses of real things, they break!) Thus in large scale multi-robot settings, say in Amazon’s warehouses, it is important to be able to compute collision-free paths for large numbers of robots simultaneously. Depending on the algorithm anyway, a GPU can help, and according to the P-ClearPath paper, this should be the case.
 
@@ -18,11 +22,11 @@ Hope to have a simple version of the P-ClearPath algorithm running with the simp
 
 Milestone 1
 
-Implement 3D version and CPU version for comparison? 
+Implement CPU version for comparison? 
 
 Milestone 2
 
-Implement the KD-Tree optimization (possible uniform grid approach instead)
+Implement the Uniform Grid optimization
 
 Milestone 3
 

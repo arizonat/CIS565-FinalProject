@@ -51,11 +51,11 @@ void checkCUDAError(const char *msg, int line = -1) {
 /*! Block size used for CUDA kernel launch. */
 #define blockSize 128
 #define robot_radius 0.5
-#define circle_radius 5
+#define circle_radius 10
 #define desired_speed 3.0f
 
 #define GRIDMAX 20 // Must be even, creates grid of GRIDMAX x GRIDMAX size
-#define NNRADIUS 4.0f
+#define NNRADIUS 2.0f
 
 // Experimental sampling
 #define MAX_VEL 3.0f
@@ -322,19 +322,23 @@ __global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
 		agents[index].pos.y = scale * circle_radius * sin(rad);
 		agents[index].pos.z = 0.0;
 
+		/*
 		if (index % 2 == 0){
 			agents[index].pos.x = circle_radius;
-			agents[index].pos.y = circle_radius - 3.0*float(index);
+			agents[index].pos.y = circle_radius - 2.0*float(index);
 		}
 		else{
 			agents[index].pos.x = -circle_radius;
-			agents[index].pos.y = circle_radius - 3.0*float(index-1);
+			agents[index].pos.y = circle_radius - 2.0*float(index-1);
 		}
+		*/
 
 		agents[index].goal = -agents[index].pos;
 
+		/*
 		agents[index].goal = agents[index].pos;
 		agents[index].goal.x *= -1;
+		*/
 
 		agents[index].radius = radius;
 		agents[index].id = index;
@@ -500,7 +504,10 @@ __global__ void kernComputeHRVOs(int totHRVOs, int numHRVOs, int numAgents, HRVO
 
 		int agent_id = agent_ids[r];
 
-		hrvos[r*numHRVOs + c] = computeHRVO(agents[agent_id], agents[neighbors[r*numHRVOs + c]], dt);
+		//hrvos[r*numHRVOs + c] = computeHRVO(agents[agent_id], agents[neighbors[r*numHRVOs + c]], dt);
+		hrvos[index] = computeHRVO(agents[agent_id], agents[neighbors[index]], dt);
+
+		printf("%d --> %d\n",agent_id,neighbors[index]);
 	}
 }
 
@@ -513,6 +520,7 @@ __global__ void kernInitCandidateVels(int totCandidates, CandidateVel* candidate
 }
 
 __global__ void kernComputeNaiveCandidateVels(int totHRVOs, int numAgents, int numHRVOs, int numCandidates, CandidateVel* candidates, HRVO* hrvos, int* agent_ids, agent* agents){
+	// This computation is heavily borrowed from Snape's HRVO implementation https://github.com/snape/HRVO
 	// naive projection velocities
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 	
@@ -549,6 +557,7 @@ __global__ void kernComputeNaiveCandidateVels(int totHRVOs, int numAgents, int n
 }
 
 __global__ void kernComputeIntersectionCandidateVels(int totHRVOs, int numAgents, int numHRVOs, int numCandidates, int offset, CandidateVel* candidates, HRVO* hrvos, int* agent_ids, agent* agents){
+	// This computation is heavily borrowed from Snape's HRVO implementation https://github.com/snape/HRVO
 	// offset is usually the number of naiveCandidates (offset of starting location in the candidate buffer
 	// intersection projection velocities
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -877,8 +886,6 @@ void ClearPath::stepSimulation(float dt, int iter) {
 
 	// Iterate through the number of neighbors and update agents accordingly
 	for (int n = 1; n <= numNeighbors; n++){
-		
-		printf("#n: %d\n",n);
 
 		// Get current neighbors
 		kernIndicateNeighborCount<<<fullBlocksPerGrid, blockSize>>>(numAgents, n, dev_indicators, dev_num_neighbors);
@@ -896,6 +903,8 @@ void ClearPath::stepSimulation(float dt, int iter) {
 
 		if (num_sub_agents == 0) continue;
 
+		printf("---num_neighbors: %d, num_agent: %d---\n", n, num_sub_agents);
+
 		cudaFree(dev_hrvos);
 		cudaFree(dev_neighbor_ids);
 		cudaFree(dev_agent_ids);
@@ -905,7 +914,6 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		cudaFree(dev_idx);
 
 		cudaMalloc((void**)&dev_idx, num_sub_agents*sizeof(int));
-
 
 		kernGetSubsetIdxes<<<fullBlocksPerGrid,blockSize>>>(numAgents, dev_idx, dev_indicators, dev_indicator_sum, dev_agents);
 		checkCUDAErrorWithLine("cudaMalloc subset idxes failed!");
@@ -921,6 +929,15 @@ void ClearPath::stepSimulation(float dt, int iter) {
 
 		kernGetSubsetNeighborIds<<<fullBlocksForNeighborIds, blockSize>>>(num_sub_agents*n, n, numNeighbors, dev_neighbor_ids, dev_ug_neighbors, dev_idx);
 		checkCUDAErrorWithLine("cudaMalloc subsetneighborsid failed!");
+
+		int* hst_neighbor_ids = (int*)malloc(sizeof(int)*num_sub_agents*n);
+		cudaMemcpy(hst_neighbor_ids, dev_neighbor_ids, sizeof(int)*num_sub_agents*n, cudaMemcpyDeviceToHost);
+		printf("things: ");
+		for (int jj = 0; jj < n*num_sub_agents; jj++){
+			printf("%d ",hst_neighbor_ids[jj]);
+		}
+		printf("\n");
+		free(hst_neighbor_ids);
 
 		numHRVOs = n;
 		totHRVOs = num_sub_agents*n;
@@ -940,7 +957,7 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		cudaMemset(dev_in_pcr, false, num_sub_agents*sizeof(bool));
 		cudaThreadSynchronize();
 
-		kernComputeHRVOs<<<fullBlocksPerGrid, blockSize>>>(totHRVOs, numHRVOs, num_sub_agents, dev_hrvos, dev_agent_ids, dev_agents, dev_ug_neighbors, dt);
+		kernComputeHRVOs<<<fullBlocksPerGrid, blockSize>>>(totHRVOs, numHRVOs, num_sub_agents, dev_hrvos, dev_agent_ids, dev_agents, dev_neighbor_ids, dt);
 		checkCUDAErrorWithLine("cudaMalloc dev_goals failed!");
 
 		kernInitCandidateVels<<<fullBlocksForCandidates, blockSize>>>(totCandidates, dev_candidates);
