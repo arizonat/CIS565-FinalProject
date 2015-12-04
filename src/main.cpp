@@ -14,7 +14,7 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 12;
+const int N_FOR_VIS = 8;
 const float DT = 0.005f; //TODO: originally 0.2
 
 glm::vec3* hst_pos;
@@ -284,6 +284,7 @@ void mainLoop() {
 		glVertex2f(hst_pos[0].x+2, hst_pos[0].y+2);
 
 		// Draw HRVOs
+		/*
 		for (int i = 0; i < N_FOR_VIS - 1; i++){
 			glm::vec3 apex = hst_agents[0].pos + hst_hrvos[i].apex;
 			glVertex2f(apex.x, apex.y);
@@ -291,8 +292,10 @@ void mainLoop() {
 			glVertex2f(apex.x, apex.y);
 			glVertex2f(apex.x + 5.0*hst_hrvos[i].right.x, apex.y + 5.0*hst_hrvos[i].right.y);
 		}
+		*/
 
 		// Draw velocity vectors
+		/*
 		glColor3f(1.0, 1.0, 0.0);
 		for (int i = 0; i < N_FOR_VIS; i++){
 			glVertex2f(hst_agents[i].pos.x, hst_agents[i].pos.y);
@@ -303,16 +306,18 @@ void mainLoop() {
 			printf("%d ", hst_num_neighbors[i]);
 		}
 		printf("\n");
+		*/
 
 		// Draw neighbors for the first robot
 		glColor3f(0.0, 1.0, 0.0);
-		for (int i = 0; i < hst_num_neighbors[0]; i++){
-			int n = hst_neighbors[i];
+		for (int i = 0; i < hst_num_neighbors[4]; i++){
+			int n = hst_neighbors[4*(N_FOR_VIS-1) + i];
 			glVertex2f(hst_agents[n].pos.x, hst_agents[n].pos.y);
 			glVertex2f(hst_agents[n].pos.x+1, hst_agents[n].pos.y+1);
 		}
 
 		// Draw Candidates
+		/*
 		glColor3f(0.0, 1.0, 0.0);
 		for (int i = 0; i < tot_num_candidates / N_FOR_VIS; i++){
 			ClearPath::CandidateVel can = hst_candidates[i];
@@ -335,7 +340,7 @@ void mainLoop() {
 				glVertex2f(p.x, p.y + 0.5f);
 			}
 		}
-
+		*/
 		glEnd();
         glUseProgram(0);
         glBindVertexArray(0);

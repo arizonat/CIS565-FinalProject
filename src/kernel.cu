@@ -51,11 +51,11 @@ void checkCUDAError(const char *msg, int line = -1) {
 /*! Block size used for CUDA kernel launch. */
 #define blockSize 128
 #define robot_radius 0.5
-#define circle_radius 9
+#define circle_radius 5
 #define desired_speed 3.0f
 
 #define GRIDMAX 20 // Must be even, creates grid of GRIDMAX x GRIDMAX size
-#define NNRADIUS 2.0f
+#define NNRADIUS 4.0f
 
 // Experimental sampling
 #define MAX_VEL 3.0f
@@ -90,6 +90,13 @@ glm::vec3* dev_vel_new;
 
 int* dev_ug_neighbors;
 int* dev_num_neighbors;
+
+bool* dev_indicators;
+int* dev_indicator_sum;
+int* dev_idx;
+
+int* dev_agent_ids;
+int* dev_neighbor_ids;
 
 HRVO* dev_hrvos;
 CandidateVel* dev_candidates;
@@ -315,7 +322,20 @@ __global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
 		agents[index].pos.y = scale * circle_radius * sin(rad);
 		agents[index].pos.z = 0.0;
 
+		if (index % 2 == 0){
+			agents[index].pos.x = circle_radius;
+			agents[index].pos.y = circle_radius - 3.0*float(index);
+		}
+		else{
+			agents[index].pos.x = -circle_radius;
+			agents[index].pos.y = circle_radius - 3.0*float(index-1);
+		}
+
 		agents[index].goal = -agents[index].pos;
+
+		agents[index].goal = agents[index].pos;
+		agents[index].goal.x *= -1;
+
 		agents[index].radius = radius;
 		agents[index].id = index;
 	}
@@ -331,9 +351,6 @@ void ClearPath::initSimulation(int N) {
 
 	cudaMalloc((void**)&dev_agents, N*sizeof(agent));
 	checkCUDAErrorWithLine("cudaMalloc dev_goals failed!");
-
-	cudaMalloc((void**)&dev_in_pcr, N*sizeof(bool));
-	checkCUDAErrorWithLine("cudaMalloc dev_in_pcr failed!");
 
 	kernInitAgents<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents, scene_scale, robot_radius);
 	checkCUDAErrorWithLine("kernInitAgents failed!");
@@ -380,8 +397,8 @@ void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec3* pos, agent* agents, H
 	cudaMemcpy(num_neighbors, dev_num_neighbors, numAgents*sizeof(int), cudaMemcpyDeviceToHost);
 
 	// HRVOs
-	cudaMemcpy(hrvos, dev_hrvos, totHRVOs*sizeof(HRVO), cudaMemcpyDeviceToHost);
-	cudaMemcpy(candidates, dev_candidates, totCandidates*sizeof(CandidateVel), cudaMemcpyDeviceToHost);
+	//cudaMemcpy(hrvos, dev_hrvos, totHRVOs*sizeof(HRVO), cudaMemcpyDeviceToHost);
+	//cudaMemcpy(candidates, dev_candidates, totCandidates*sizeof(CandidateVel), cudaMemcpyDeviceToHost);
 
     cudaThreadSynchronize();
 }
@@ -401,12 +418,13 @@ __global__ void kernUpdatePos(int N, float dt, agent* dev_agents, glm::vec3 *dev
 	}
 }
 
-__global__ void kernUpdateVel(int numAgents, agent* agents, bool* in_pcr, glm::vec3* vel_new){
+__global__ void kernUpdateVel(int numAgents, int* agent_ids, agent* agents, bool* in_pcr, glm::vec3* vel_new){
 	int index = (blockDim.x*blockIdx.x) + threadIdx.x;
 
 	if (index < numAgents){
 		if (in_pcr[index]){
-			agents[index].vel = vel_new[index];
+			int agent_id = agent_ids[index];
+			agents[agent_id].vel = vel_new[index];
 		}
 	}
 }
@@ -472,7 +490,7 @@ __global__ void kernUpdateDesVelCollision(int N, agent* agents, int* neighbors){
 * HRVO Kernels *
 ******************/
 
-__global__ void kernComputeHRVOs(int totHRVOs, int numHRVOs, int numAgents, HRVO* hrvos, agent* agents, int* neighbors, float dt){
+__global__ void kernComputeHRVOs(int totHRVOs, int numHRVOs, int numAgents, HRVO* hrvos, int* agent_ids, agent* agents, int* neighbors, float dt){
 	// Get all RVOs in parallel
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
@@ -480,11 +498,9 @@ __global__ void kernComputeHRVOs(int totHRVOs, int numHRVOs, int numAgents, HRVO
 		int r = index / numHRVOs;
 		int c = index % numHRVOs;
 
-		hrvos[r*numHRVOs + c] = computeHRVO(agents[r], agents[neighbors[r*numHRVOs + c]], dt);
+		int agent_id = agent_ids[r];
 
-		//for (int i = 0; i < numNeighbors; i++){
-		//	hrvos[i + numNeighbors*index] = computeHRVO(agents[index], agents[neighbors[i + numNeighbors*index]], dt);
-		//}
+		hrvos[r*numHRVOs + c] = computeHRVO(agents[agent_id], agents[neighbors[r*numHRVOs + c]], dt);
 	}
 }
 
@@ -496,7 +512,7 @@ __global__ void kernInitCandidateVels(int totCandidates, CandidateVel* candidate
 	}
 }
 
-__global__ void kernComputeNaiveCandidateVels(int totHRVOs, int numAgents, int numHRVOs, int numCandidates, CandidateVel* candidates, HRVO* hrvos, agent* agents){
+__global__ void kernComputeNaiveCandidateVels(int totHRVOs, int numAgents, int numHRVOs, int numCandidates, CandidateVel* candidates, HRVO* hrvos, int* agent_ids, agent* agents){
 	// naive projection velocities
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 	
@@ -504,7 +520,9 @@ __global__ void kernComputeNaiveCandidateVels(int totHRVOs, int numAgents, int n
 		int r = index / numHRVOs;
 		int c = index % numHRVOs;
 		
-		glm::vec3 prefVel = agents[r].vel;
+		int agent_id = agent_ids[r];
+
+		glm::vec3 prefVel = agents[agent_id].vel;
 
 		float dot1 = glm::dot(prefVel - hrvos[index].apex, hrvos[index].right);
 		float dot2 = glm::dot(prefVel - hrvos[index].apex, hrvos[index].left);
@@ -530,7 +548,7 @@ __global__ void kernComputeNaiveCandidateVels(int totHRVOs, int numAgents, int n
 	}
 }
 
-__global__ void kernComputeIntersectionCandidateVels(int totHRVOs, int numAgents, int numHRVOs, int numCandidates, int offset, CandidateVel* candidates, HRVO* hrvos, agent* agents){
+__global__ void kernComputeIntersectionCandidateVels(int totHRVOs, int numAgents, int numHRVOs, int numCandidates, int offset, CandidateVel* candidates, HRVO* hrvos, int* agent_ids, agent* agents){
 	// offset is usually the number of naiveCandidates (offset of starting location in the candidate buffer
 	// intersection projection velocities
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -539,7 +557,9 @@ __global__ void kernComputeIntersectionCandidateVels(int totHRVOs, int numAgents
 		int r = index / numHRVOs;
 		int c = index % numHRVOs;
 
-		glm::vec3 prefVel = agents[r].vel;
+		int agent_id = agent_ids[r];
+
+		glm::vec3 prefVel = agents[agent_id].vel;
 
 		CandidateVel candidate;
 
@@ -618,13 +638,15 @@ __global__ void kernComputeIntersectionCandidateVels(int totHRVOs, int numAgents
 	}
 }
 
-__global__ void kernComputeInPCR(int numAgents, int numHRVOs, bool* in_pcr, HRVO* hrvos, agent* agents){
+__global__ void kernComputeInPCR(int numAgents, int numHRVOs, bool* in_pcr, HRVO* hrvos, int* agent_ids, agent* agents){
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
 	if (index < numAgents){
+		int agent_id = agent_ids[index];
+
 		for (int i = 0; i < numHRVOs; i++){
-			if (det2(hrvos[index*numHRVOs + i].left, agents[index].vel - hrvos[index*numHRVOs + i].apex) < 0.0f &&
-				det2(hrvos[index*numHRVOs + i].right, agents[index].vel - hrvos[index*numHRVOs + i].apex) > 0.0f){
+			if (det2(hrvos[index*numHRVOs + i].left, agents[agent_id].vel - hrvos[index*numHRVOs + i].apex) < 0.0f &&
+				det2(hrvos[index*numHRVOs + i].right, agents[agent_id].vel - hrvos[index*numHRVOs + i].apex) > 0.0f){
 				in_pcr[index] = true;
 			}
 		}
@@ -669,78 +691,48 @@ __global__ void kernComputeBestVel(int numAgents, int numCandidates, glm::vec3* 
 	}
 }
 
-/******************
-* Sample-based RVO Kernels *
-******************/
+__global__ void kernIndicateNeighborCount(int numAgents, int des_neighbor_count, bool* indicators, int* num_neighbors){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-__global__ void kernSampleVelocities(int totSamples, float time, glm::vec3* sample_vels){
-	// totSamples = numAgents * samplesPerAgent
-	int index = (blockDim.x*blockIdx.x) + threadIdx.x;
+	if (index < numAgents){
+		indicators[index] = false;
 
-	if (index < totSamples){
-		sample_vels[index] = sampleRandom2DVelocity(time, index);
-	}
-}
-
-__global__ void kernScoreSamples(int totSamples, int numAgents, int samplesPerAgent, float* scores, glm::vec3* sample_vels, agent* agents){
-	int index = (blockDim.x*blockIdx.x) + threadIdx.x;
-
-	if (index < totSamples){
-		int sr = index / samplesPerAgent;
-		int sc = index % samplesPerAgent;
-
-		float wi = 1.0f;
-		wi = agents[sr].w;
-
-		float tc = INFINITY;
-		float tci;
-
-		glm::vec3 pA, pB, vA, vB, vABp;
-		float t;
-		bool intersects;
-		float radius2;
-
-		// Get time to collision
-		for (int i = 0; i < numAgents; i++){
-			if (i == sr) continue;
-
-			pA = agents[sr].pos;
-			vA = agents[sr].vel;
-			vB = agents[i].vel;
-			pB = agents[i].pos;
-			vABp = 2.0f*sample_vels[index] - vA - vB;
-			radius2 = (agents[i].radius + agents[sr].radius)*(agents[i].radius + agents[sr].radius);
-			//intersects = glm::intersectRaySphere(pA, glm::normalize(vABp), pB, radius2, t);
-			intersects = intersectRaySphere(pA, glm::normalize(vABp), pB, radius2, t);
-
-			if (intersects && t < tc){
-				tc = t;
-			}
-		}
-
-		// Compute score
-		if (tc != INFINITY){
-			scores[index] = wi * (1.0 / tc) + glm::length(agents[sr].vel - sample_vels[index]);
-		}
-		else {
-			scores[index] = glm::length(agents[sr].vel - sample_vels[index]);
+		if (num_neighbors[index] == des_neighbor_count){
+			indicators[index] = true;
 		}
 	}
 }
 
-__global__ void kernSelectVel(int numAgents, int samplesPerAgent, float* scores, glm::vec3* sample_vels, agent* agents, bool* in_pcr){
-	int index = (blockDim.x*blockIdx.x) + threadIdx.x;
+__global__ void kernGetSubsetAgentIds(int num_sub_agents, int* sub_agent_ids, int* idx, agent* agents){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-	if (index < numAgents && in_pcr[index]){
-		float score = INFINITY;
-		for (int i = 0; i < samplesPerAgent; i++){
-			if (scores[i + index*samplesPerAgent] < score){
-				score = scores[i + index*samplesPerAgent];
-				agents[index].vel = sample_vels[i + index*samplesPerAgent];
-			}
+	if (index < num_sub_agents){
+		sub_agent_ids[index] = agents[idx[index]].id;
+	}
+}
+
+__global__ void kernGetSubsetNeighborIds(int num_sub_neighbors, int num_sub_neighbors_per_agent, int num_max_neighbors_per_agent, int* sub_neighbors, int* neighbors, int* idx){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	if (index < num_sub_neighbors){
+		int r = index / num_sub_neighbors_per_agent;
+		int c = index % num_sub_neighbors_per_agent;
+
+		int agent_id = idx[r];
+		sub_neighbors[index] = neighbors[agent_id*num_max_neighbors_per_agent + c];
+	}
+}
+
+__global__ void kernGetSubsetIdxes(int numAgents, int* idxes, bool* indicators, int* indicator_sum, agent* agents){
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	if (index < numAgents){
+		if (indicators[index]){
+			idxes[indicator_sum[index]] = agents[index].id;
 		}
 	}
 }
+
 
 /******************
 * Uniform Grid Kernels *
@@ -833,45 +825,32 @@ void ClearPath::stepSimulation(float dt, int iter) {
 
 	// Allocate space for neighbors, FVOs, intersection points (how to do this?)
 	numNeighbors = numAgents - 1;
-	numHRVOs = numNeighbors;
-	totHRVOs = numAgents * numHRVOs;
-	int numNaiveCandidates = 2 * numHRVOs;
-	int numIntersectionCandidates = 4 * numHRVOs*(numHRVOs - 1);
-	numCandidates = numNaiveCandidates + numIntersectionCandidates;
-	totCandidates = numAgents * numCandidates;
 
 	// Get the number of blocks we need
 	dim3 fullBlocksForUG((GRIDMAX*GRIDMAX + blockSize - 1) / blockSize);
-	dim3 fullBlocksForHRVOs((totHRVOs + blockSize - 1) / blockSize);
-	dim3 fullBlocksForCandidates((totCandidates + blockSize - 1) / blockSize);
 
 	// Free everything
 	cudaFree(dev_neighbors);
-	cudaFree(dev_vel_new);
-	cudaFree(dev_hrvos);
-	cudaFree(dev_candidates);
 	
 	// UG
 	cudaFree(dev_uglist);
 	cudaFree(dev_startIdx);
 	cudaFree(dev_ug_neighbors);
 	cudaFree(dev_num_neighbors);
-	
-	cudaMalloc((void**)&dev_vel_new, numAgents*sizeof(glm::vec3));
+
+	cudaFree(dev_indicators);
+	cudaFree(dev_indicator_sum);
 
 	cudaMalloc((void**)&dev_neighbors, numAgents*numNeighbors*sizeof(int));
-	cudaMalloc((void**)&dev_hrvos, totHRVOs*sizeof(HRVO));
-	cudaMalloc((void**)&dev_candidates, totCandidates*sizeof(CandidateVel));
-	
+
 	// UG
 	cudaMalloc((void**)&dev_uglist, numAgents*sizeof(UGEntry));
 	cudaMalloc((void**)&dev_startIdx, GRIDMAX*GRIDMAX*sizeof(int));
 	cudaMalloc((void**)&dev_ug_neighbors, numNeighbors*numAgents*sizeof(int));
 	cudaMalloc((void**)&dev_num_neighbors, numAgents*sizeof(int));
-	
-	// TODO: this should actually be a kernel initialization
-	cudaMemset(dev_in_pcr, false, numAgents*sizeof(bool));
-	cudaThreadSynchronize();
+
+	cudaMalloc((void**)&dev_indicators, numAgents*sizeof(bool));
+	cudaMalloc((void**)&dev_indicator_sum, numAgents*sizeof(int));
 
 	// Find neighbors
 	// TODO: 2 arrays: 1 of all the ones that have same # neighbors, other has the remaining uncomputed ones
@@ -893,21 +872,99 @@ void ClearPath::stepSimulation(float dt, int iter) {
 	// Get the neighbors
 	kernComputeUGNeighbors<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_ug_neighbors, dev_num_neighbors, dev_agents, dev_startIdx, dev_uglist);
 
-	kernComputeHRVOs<<<fullBlocksPerGrid, blockSize>>>(totHRVOs, numHRVOs, numAgents, dev_hrvos, dev_agents, dev_neighbors, dt);
+	int num_sub_agents;
+	bool last_indicator;
 
-	kernInitCandidateVels<<<fullBlocksForCandidates, blockSize>>>(totCandidates, dev_candidates);
+	// Iterate through the number of neighbors and update agents accordingly
+	for (int n = 1; n <= numNeighbors; n++){
+		
+		printf("#n: %d\n",n);
 
-	kernComputeNaiveCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, numAgents, numHRVOs, numCandidates, dev_candidates, dev_hrvos, dev_agents);
+		// Get current neighbors
+		kernIndicateNeighborCount<<<fullBlocksPerGrid, blockSize>>>(numAgents, n, dev_indicators, dev_num_neighbors);
+		thrust::exclusive_scan(thrust::device, dev_indicators, dev_indicators+numAgents, dev_indicator_sum);
 
-	kernComputeIntersectionCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, numAgents, numHRVOs, numCandidates, numNaiveCandidates, dev_candidates, dev_hrvos, dev_agents);
+		checkCUDAErrorWithLine("thrust failed?");
 
-	kernComputeValidCandidateVels<<<fullBlocksForCandidates, blockSize>>>(totCandidates, numAgents, numHRVOs, numCandidates, dev_candidates, dev_hrvos, dev_agents);
+		num_sub_agents = 0;
+		last_indicator = false;
+		cudaMemcpy(&last_indicator, dev_indicators + numAgents-1, sizeof(bool), cudaMemcpyDeviceToHost);
+		cudaMemcpy(&num_sub_agents, dev_indicator_sum + numAgents-1, sizeof(int), cudaMemcpyDeviceToHost);
+		num_sub_agents += last_indicator;
 
-	kernComputeBestVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, numCandidates, dev_vel_new, dev_candidates);
+		checkCUDAErrorWithLine("computing numbers failed?");
 
-	kernComputeInPCR<<<fullBlocksPerGrid, blockSize>>>(numAgents, numHRVOs, dev_in_pcr, dev_hrvos, dev_agents);
+		if (num_sub_agents == 0) continue;
 
-	kernUpdateVel<<<fullBlocksPerGrid,blockSize>>>(numAgents, dev_agents, dev_in_pcr, dev_vel_new);
+		cudaFree(dev_hrvos);
+		cudaFree(dev_neighbor_ids);
+		cudaFree(dev_agent_ids);
+		cudaFree(dev_candidates);
+		cudaFree(dev_in_pcr);
+		cudaFree(dev_vel_new);
+		cudaFree(dev_idx);
+
+		cudaMalloc((void**)&dev_idx, num_sub_agents*sizeof(int));
+
+
+		kernGetSubsetIdxes<<<fullBlocksPerGrid,blockSize>>>(numAgents, dev_idx, dev_indicators, dev_indicator_sum, dev_agents);
+		checkCUDAErrorWithLine("cudaMalloc subset idxes failed!");
+
+		cudaMalloc((void**)&dev_agent_ids, num_sub_agents*sizeof(int));
+		cudaMalloc((void**)&dev_neighbor_ids, num_sub_agents*n*sizeof(int));
+
+		dim3 fullBlocksForNeighborIds((n*num_sub_agents + blockSize - 1) / blockSize);
+		dim3 fullBlocksForAgentIds((num_sub_agents + blockSize - 1) / blockSize);
+
+		kernGetSubsetAgentIds<<<fullBlocksForAgentIds, blockSize>>>(num_sub_agents, dev_agent_ids, dev_idx, dev_agents);
+		checkCUDAErrorWithLine("cudaMalloc subsetagentsid failed!");
+
+		kernGetSubsetNeighborIds<<<fullBlocksForNeighborIds, blockSize>>>(num_sub_agents*n, n, numNeighbors, dev_neighbor_ids, dev_ug_neighbors, dev_idx);
+		checkCUDAErrorWithLine("cudaMalloc subsetneighborsid failed!");
+
+		numHRVOs = n;
+		totHRVOs = num_sub_agents*n;
+		int numNaiveCandidates = 2 * numHRVOs;
+		int numIntersectionCandidates = 4 * numHRVOs * (numHRVOs - 1);
+		numCandidates = numNaiveCandidates + numIntersectionCandidates;
+		totCandidates = num_sub_agents * numCandidates;
+
+		dim3 fullBlocksForHRVOs((totHRVOs + blockSize - 1) / blockSize);
+		dim3 fullBlocksForCandidates((totCandidates + blockSize - 1) / blockSize);
+
+		cudaMalloc((void**)&dev_hrvos, totHRVOs*sizeof(HRVO));
+		cudaMalloc((void**)&dev_candidates, totCandidates*sizeof(CandidateVel));
+		cudaMalloc((void**)&dev_vel_new, num_sub_agents*sizeof(glm::vec3));
+		cudaMalloc((void**)&dev_in_pcr, num_sub_agents*sizeof(bool));
+
+		cudaMemset(dev_in_pcr, false, num_sub_agents*sizeof(bool));
+		cudaThreadSynchronize();
+
+		kernComputeHRVOs<<<fullBlocksPerGrid, blockSize>>>(totHRVOs, numHRVOs, num_sub_agents, dev_hrvos, dev_agent_ids, dev_agents, dev_ug_neighbors, dt);
+		checkCUDAErrorWithLine("cudaMalloc dev_goals failed!");
+
+		kernInitCandidateVels<<<fullBlocksForCandidates, blockSize>>>(totCandidates, dev_candidates);
+		checkCUDAErrorWithLine("cudaMalloc cand vels failed!");
+
+		kernComputeNaiveCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, num_sub_agents, numHRVOs, numCandidates, dev_candidates, dev_hrvos, dev_agent_ids, dev_agents);
+		checkCUDAErrorWithLine("cudaMalloc naive vels failed!");
+
+		kernComputeIntersectionCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, num_sub_agents, numHRVOs, numCandidates, numNaiveCandidates, dev_candidates, dev_hrvos, dev_agent_ids, dev_agents);
+		checkCUDAErrorWithLine("cudaMalloc intersection vels failed!");
+
+		kernComputeValidCandidateVels<<<fullBlocksForCandidates, blockSize>>>(totCandidates, num_sub_agents, numHRVOs, numCandidates, dev_candidates, dev_hrvos, dev_agents);
+		checkCUDAErrorWithLine("cudaMalloc compute valid vels failed!");
+
+		kernComputeBestVel<<<fullBlocksPerGrid, blockSize>>>(num_sub_agents, numCandidates, dev_vel_new, dev_candidates);
+		checkCUDAErrorWithLine("cudaMalloc best vels failed!");
+
+		kernComputeInPCR<<<fullBlocksPerGrid, blockSize>>>(num_sub_agents, numHRVOs, dev_in_pcr, dev_hrvos, dev_agent_ids, dev_agents);
+		checkCUDAErrorWithLine("cudaMalloc in pcr failed!");
+
+		kernUpdateVel<<<fullBlocksPerGrid, blockSize>>>(num_sub_agents, dev_agent_ids, dev_agents, dev_in_pcr, dev_vel_new);
+		checkCUDAErrorWithLine("cudaMalloc update vels failed!");
+
+	}
 
 	agent* hst_agents = (agent*)malloc(numAgents*sizeof(agent));
 	cudaMemcpy(hst_agents, dev_agents, numAgents*sizeof(agent), cudaMemcpyDeviceToHost);
