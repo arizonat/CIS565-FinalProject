@@ -14,19 +14,16 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 2;
+const int N_FOR_VIS = 12;
 const float DT = 0.005f; //TODO: originally 0.2
 
 glm::vec3* hst_pos;
-ClearPath::intersection* hst_intersections;
-ClearPath::segment* hst_segments;
 ClearPath::agent* hst_agents;
 ClearPath::HRVO* hst_hrvos;
 ClearPath::CandidateVel* hst_candidates;
 
 int* hst_neighbors;
 int* hst_num_neighbors;
-int tot_num_intersections;
 int tot_num_hrvos;
 int tot_num_candidates;
 
@@ -136,10 +133,6 @@ bool init(int argc, char **argv) {
 	hst_pos = (glm::vec3*)malloc(N_FOR_VIS*sizeof(glm::vec3));
 	hst_agents = (ClearPath::agent*)malloc(N_FOR_VIS*sizeof(ClearPath::agent));
 	
-	tot_num_intersections = (N_FOR_VIS - 1) * 3 * ((N_FOR_VIS - 1) * 3 - 1) * N_FOR_VIS;
-	//printf("hst intersections: %d\n", tot_num_intersections);
-	hst_intersections = (ClearPath::intersection*)malloc(tot_num_intersections*sizeof(ClearPath::intersection));
-	
 	hst_neighbors = (int*)malloc(N_FOR_VIS*(N_FOR_VIS-1)*sizeof(int));
 	hst_num_neighbors = (int*)malloc(N_FOR_VIS*sizeof(int));
 
@@ -219,7 +212,6 @@ void initShaders(GLuint * program) {
 													 "shaders/line.frag.glsl", attributeLocations, 1);
 	//glUseProgram(program[PROG_LINE]);
 
-	hst_endpoints = (glm::vec2*)malloc(6 * (N_FOR_VIS*(N_FOR_VIS-1))*sizeof(glm::vec2));
 }
 
 //====================================
@@ -238,7 +230,7 @@ void runCUDA() {
     ClearPath::stepSimulation(DT, iter);
 	iter++;
 #if VISUALIZE
-    ClearPath::copyAgentsToVBO(dptrvert, hst_endpoints, hst_pos, hst_agents, hst_hrvos, hst_candidates, hst_intersections, hst_neighbors, hst_num_neighbors);
+    ClearPath::copyAgentsToVBO(dptrvert, hst_pos, hst_agents, hst_hrvos, hst_candidates, hst_neighbors, hst_num_neighbors);
 #endif
     // unmap buffer object
     cudaGLUnmapBufferObject(planetVBO);
@@ -290,14 +282,6 @@ void mainLoop() {
 		// Mark robot of focus
 		glVertex2f(hst_pos[0].x,hst_pos[0].y);
 		glVertex2f(hst_pos[0].x+2, hst_pos[0].y+2);
-		
-		// Draw FVOs
-		/*
-		for (int i = 0; i < 6*(N_FOR_VIS-1); i++){
-			glVertex2f(hst_endpoints[i].x, hst_endpoints[i].y);
-			//printf("%f, %f\n",hst_endpoints[i].x,hst_endpoints[i].y);
-		}
-		*/
 
 		// Draw HRVOs
 		for (int i = 0; i < N_FOR_VIS - 1; i++){
@@ -314,6 +298,11 @@ void mainLoop() {
 			glVertex2f(hst_agents[i].pos.x, hst_agents[i].pos.y);
 			glVertex2f(hst_agents[i].pos.x+hst_agents[i].vel.x, hst_agents[i].pos.y+hst_agents[i].vel.y);
 		}
+
+		for (int i = 0; i < N_FOR_VIS; i++){
+			printf("%d ", hst_num_neighbors[i]);
+		}
+		printf("\n");
 
 		// Draw neighbors for the first robot
 		glColor3f(0.0, 1.0, 0.0);
@@ -346,30 +335,6 @@ void mainLoop() {
 				glVertex2f(p.x, p.y + 0.5f);
 			}
 		}
-
-		// Draw intersection points
-		/*
-		glColor3f(0.0,1.0,0.0);
-		for (int i = 0; i < tot_num_intersections/N_FOR_VIS; i++){
-			if (hst_intersections[i].isIntersection){
-				//printf("%f  \n", hst_intersections[i].distToOrigin);
-				if (hst_intersections[i].isOutside){
-					glColor3f(0.0, 1.0, 0.0);
-				}
-				else {
-					glColor3f(0.0, 1.0, 1.0);
-				}
-
-				glVertex2f(hst_intersections[i].point.x - 0.5, hst_intersections[i].point.y - 0.5);
-				glVertex2f(hst_intersections[i].point.x + 0.5f, hst_intersections[i].point.y + 0.5f);
-				glVertex2f(hst_intersections[i].point.x - 0.5, hst_intersections[i].point.y + 0.5);
-				glVertex2f(hst_intersections[i].point.x + 0.5f, hst_intersections[i].point.y - 0.5f);
-				glVertex2f(hst_intersections[i].point.x, hst_intersections[i].point.y - 0.5);
-				glVertex2f(hst_intersections[i].point.x, hst_intersections[i].point.y + 0.5f);
-			}
-		}
-		printf("\n");
-		*/
 
 		glEnd();
         glUseProgram(0);
