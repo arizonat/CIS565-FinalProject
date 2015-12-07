@@ -3,6 +3,8 @@
 #include <thrust/device_ptr.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
+#include <thrust/unique.h>
+#include <thrust/copy.h>
 #include <stdio.h>
 #include <cuda.h>
 #include <cmath>
@@ -50,15 +52,15 @@ void checkCUDAError(const char *msg, int line = -1) {
 
 /*! Block size used for CUDA kernel launch. */
 #define blockSize 128
-#define robot_radius 0.5
-#define circle_radius 10
-#define desired_speed 3.0f
+#define robot_radius 0.5 // 0.5 default
+#define circle_radius 10 // 10 for 30 robots
+#define desired_speed 3.0f // 3.0 default
 
 #define GRIDMAX 20 // Must be even, creates grid of GRIDMAX x GRIDMAX size
-#define NNRADIUS 2.0f
+#define NNRADIUS 2.0f // 2.0 default
 
 // Experimental sampling
-#define MAX_VEL 3.0f
+#define MAX_VEL 3.0f // 3.0 default
 
 /***********************************************
 * Kernel state (pointers are device pointers) *
@@ -97,6 +99,11 @@ int* dev_idx;
 
 int* dev_agent_ids;
 int* dev_neighbor_ids;
+
+
+bool* dev_unique_indicators;
+int* dev_unique_idxes;
+int* dev_unique_counts;
 
 HRVO* dev_hrvos;
 CandidateVel* dev_candidates;
@@ -322,19 +329,21 @@ __global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
 		agents[index].pos.y = scale * circle_radius * sin(rad);
 		agents[index].pos.z = 0.0;
 
+		// lines
 		/*
 		if (index % 2 == 0){
 			agents[index].pos.x = circle_radius;
-			agents[index].pos.y = circle_radius - 2.0*float(index);
+			agents[index].pos.y = circle_radius - 1.1*float(index);
 		}
 		else{
 			agents[index].pos.x = -circle_radius;
-			agents[index].pos.y = circle_radius - 2.0*float(index-1);
+			agents[index].pos.y = circle_radius - 1.1*float(index-1);
 		}
 		*/
 
 		agents[index].goal = -agents[index].pos;
 
+		// lines
 		/*
 		agents[index].goal = agents[index].pos;
 		agents[index].goal.x *= -1;
@@ -405,6 +414,41 @@ void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec3* pos, agent* agents, H
 	//cudaMemcpy(candidates, dev_candidates, totCandidates*sizeof(CandidateVel), cudaMemcpyDeviceToHost);
 
     cudaThreadSynchronize();
+}
+
+/******************
+* Common Utility Kernels *
+******************/
+
+struct is_true{
+	__host__ __device__ bool operator()(const bool x){
+		return x;
+	}
+};
+
+__global__ void kernUnique(int N, bool* indicators, int* input){
+	// Expects a sorted array of integers, returns a bool array of the same length indicating 
+	// whether or not a position in that array contains a unique integer
+
+	int index = (blockDim.x * blockIdx.x) + threadIdx.x;
+
+	if (index < N){
+		if (index == 0 || input[index] != input[index-1]){
+			indicators[index] = true;
+			return;
+		}
+		indicators[index] = false;
+	}
+}
+
+__global__ void kernGather(int N, int* output, int* input, bool* indicators, int* idxes){
+	int index = (blockDim.x * blockIdx.x) + threadIdx.x;
+
+	if (index < N){
+		if (indicators[index]){
+			output[idxes[index]] = input[index];
+		}
+	}
 }
 
 /******************
@@ -507,7 +551,7 @@ __global__ void kernComputeHRVOs(int totHRVOs, int numHRVOs, int numAgents, HRVO
 		//hrvos[r*numHRVOs + c] = computeHRVO(agents[agent_id], agents[neighbors[r*numHRVOs + c]], dt);
 		hrvos[index] = computeHRVO(agents[agent_id], agents[neighbors[index]], dt);
 
-		printf("%d --> %d\n",agent_id,neighbors[index]);
+		//printf("%d --> %d\n",agent_id,neighbors[index]);
 	}
 }
 
@@ -841,6 +885,9 @@ void ClearPath::stepSimulation(float dt, int iter) {
 	// Free everything
 	cudaFree(dev_neighbors);
 	
+	cudaFree(dev_unique_indicators);
+	cudaFree(dev_unique_idxes);
+
 	// UG
 	cudaFree(dev_uglist);
 	cudaFree(dev_startIdx);
@@ -881,11 +928,53 @@ void ClearPath::stepSimulation(float dt, int iter) {
 	// Get the neighbors
 	kernComputeUGNeighbors<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_ug_neighbors, dev_num_neighbors, dev_agents, dev_startIdx, dev_uglist);
 
+	
+	int* dev_neighbor_counts;
+	int* dev_neighbor_counts_end;
+	cudaMalloc((void**)&dev_neighbor_counts, sizeof(int)*numAgents);
+
+	cudaMemcpy(dev_neighbor_counts, dev_num_neighbors, sizeof(int)*numAgents, cudaMemcpyDeviceToDevice);
+	thrust::device_ptr<int> thrust_neighbor_counts = thrust::device_pointer_cast(dev_neighbor_counts);
+	thrust::sort(thrust::device,thrust_neighbor_counts, thrust_neighbor_counts+numAgents);
+
+	cudaMalloc((void**)&dev_unique_indicators, numAgents*sizeof(bool));
+	cudaMemset(dev_unique_indicators, false, numAgents*sizeof(bool));
+	cudaMalloc((void**)&dev_unique_idxes, numAgents*sizeof(int));
+
+	int* hst_neighbor_counts = (int*)malloc(numAgents*sizeof(int));
+	cudaMemcpy(hst_neighbor_counts, dev_neighbor_counts, numAgents*sizeof(int), cudaMemcpyDeviceToHost);
+	
+	kernUnique<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_unique_indicators, dev_neighbor_counts);
+	cudaThreadSynchronize();
+
+	bool* hst_unique_indicators = (bool*)malloc(numAgents*sizeof(bool));
+	cudaMemcpy(hst_unique_indicators, dev_unique_indicators,numAgents*sizeof(bool), cudaMemcpyDeviceToHost);
+
+	int num_unique;
+	bool last_unique_indicator;
+	//thrust::device_ptr<int> thrust_unique_indicators = thrust::device_pointer_cast(dev_unique_indicators);
+	thrust::exclusive_scan(thrust::device, dev_unique_indicators, dev_unique_indicators + numAgents, dev_unique_idxes);
+
+	cudaMemcpy(&last_unique_indicator, dev_unique_indicators + numAgents - 1, sizeof(bool), cudaMemcpyDeviceToHost);
+	cudaMemcpy(&num_unique, dev_unique_idxes + numAgents - 1, sizeof(int), cudaMemcpyDeviceToHost);
+
+	num_unique += last_unique_indicator;
+
+	cudaMalloc((void**)&dev_unique_counts, numAgents*sizeof(int));
+	kernGather<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_unique_counts, dev_neighbor_counts, dev_unique_indicators, dev_unique_idxes);
+
+	int* hst_unique_counts = (int*)malloc(num_unique*sizeof(int));
+	cudaMemcpy(hst_unique_counts, dev_unique_counts, num_unique*sizeof(int), cudaMemcpyDeviceToHost);
+
+	// Iterate through the number of neighbors and update agents accordingly
 	int num_sub_agents;
 	bool last_indicator;
 
-	// Iterate through the number of neighbors and update agents accordingly
-	for (int n = 1; n <= numNeighbors; n++){
+	for (int i = 0; i < num_unique; i++){
+
+		int n = hst_unique_counts[i];
+
+		if (n == 0) continue;
 
 		// Get current neighbors
 		kernIndicateNeighborCount<<<fullBlocksPerGrid, blockSize>>>(numAgents, n, dev_indicators, dev_num_neighbors);
@@ -903,7 +992,7 @@ void ClearPath::stepSimulation(float dt, int iter) {
 
 		if (num_sub_agents == 0) continue;
 
-		printf("---num_neighbors: %d, num_agent: %d---\n", n, num_sub_agents);
+		//printf("---num_neighbors: %d, num_agent: %d---\n", n, num_sub_agents);
 
 		cudaFree(dev_hrvos);
 		cudaFree(dev_neighbor_ids);
@@ -930,6 +1019,7 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		kernGetSubsetNeighborIds<<<fullBlocksForNeighborIds, blockSize>>>(num_sub_agents*n, n, numNeighbors, dev_neighbor_ids, dev_ug_neighbors, dev_idx);
 		checkCUDAErrorWithLine("cudaMalloc subsetneighborsid failed!");
 
+		/*
 		int* hst_neighbor_ids = (int*)malloc(sizeof(int)*num_sub_agents*n);
 		cudaMemcpy(hst_neighbor_ids, dev_neighbor_ids, sizeof(int)*num_sub_agents*n, cudaMemcpyDeviceToHost);
 		printf("things: ");
@@ -938,6 +1028,7 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		}
 		printf("\n");
 		free(hst_neighbor_ids);
+		*/
 
 		numHRVOs = n;
 		totHRVOs = num_sub_agents*n;

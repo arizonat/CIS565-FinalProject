@@ -14,8 +14,8 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 35;
-const float DT = 0.005f; //TODO: 0.02 works for 30 robots
+const int N_FOR_VIS = 30;
+const float DT = 0.02f; //TODO: 30 with 0.02
 
 glm::vec3* hst_pos;
 ClearPath::agent* hst_agents;
@@ -310,8 +310,9 @@ void mainLoop() {
 
 		// Draw neighbors for the first robot
 		glColor3f(0.0, 1.0, 0.0);
-		for (int i = 0; i < hst_num_neighbors[4]; i++){
-			int n = hst_neighbors[4*(N_FOR_VIS-1) + i];
+		int robot = 0;
+		for (int i = 0; i < hst_num_neighbors[robot]; i++){
+			int n = hst_neighbors[robot*(N_FOR_VIS-1) + i];
 			glVertex2f(hst_agents[n].pos.x, hst_agents[n].pos.y);
 			glVertex2f(hst_agents[n].pos.x+1, hst_agents[n].pos.y+1);
 		}
