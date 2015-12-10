@@ -4,6 +4,7 @@ HRVO using ClearPath on CUDA
 
 NOTE: Intersection computation is heavily borrowed from the original HRVO implementation (from Snape: https://github.com/snape/HRVO)
 
+![](img/representative_img.PNG)
 
 For my final project I am planning to implement the P-ClearPath algorithm for collision avoidance for multi-agent systems. In robotics, collision avoidance is especially important, since we use very expensive yet very fragile equipment (oh the curses of real things, they break!) Thus in large scale multi-robot settings, say in Amazon’s warehouses, it is important to be able to compute collision-free paths for large numbers of robots simultaneously. Depending on the algorithm anyway, a GPU can help, and according to the P-ClearPath paper, this should be the case.
 
