@@ -21,9 +21,10 @@
 
 #define sign(x) (x>0)-(x<0)
 
-//#define USE_FVO 0
-//#define USE_SAMPLING 0
-#define USE_HRVO 1
+#define UNIFORM_GRID
+//#define GPU_NN
+//#define CPU_UNIFORM_GRID
+//#define CPU_NN
 
 //#define INFINITY 0x7f800000
 #define NEG_INFINITY 0xff800000
@@ -51,19 +52,19 @@ void checkCUDAError(const char *msg, int line = -1) {
 *****************/
 
 /*! Block size used for CUDA kernel launch. */
-#define blockSize 1024
+#define blockSize 1024 //128
 #define robot_radius 0.5 // 0.5 default
-#define circle_radius 30 // 10 for 30 robots, 30 for 100 robots
+#define circle_radius 1.5 // 10 for 30 robots, 30 for 100 robots
 #define desired_speed 3.0f // 3.0 default
 
-#define GRIDMAX 90 // Must be even, creates grid of GRIDMAX x GRIDMAX size
+#define GRIDMAX 10 // Must be even, creates grid of GRIDMAX x GRIDMAX size
 
-#define NNRADIUS 3.0f // 2.0 default, 1.5 for 100 robots
+#define NNRADIUS 4.0f // 2.0 default, 1.5 for 100 robots
 
 // Experimental sampling
 #define MAX_VEL 4.0f // 3.0 default
 
-/***********************************************
+/**********************************************
 * Kernel state (pointers are device pointers) *
 ***********************************************/
 
@@ -108,9 +109,16 @@ int* dev_unique_counts;
 HRVO* dev_hrvos;
 CandidateVel* dev_candidates;
 
-/*******************
+
+agent* hst_agents_;
+UGEntry* hst_uglist_;
+int* hst_startIdx_;
+int* hst_ug_neighbors_;
+int* hst_num_neighbors_;
+
+/*************************
 * Uniform Grid Functions *
-********************/
+**************************/
 
 __host__ __device__ Cell getGridCell(float radius, agent a){
 	Cell cell;
@@ -135,16 +143,7 @@ __host__ __device__ Cell getCellFromId(int id){
 	return cell;
 }
 
-__global__ void kernUpdateUniformGrid(int numAgents, UGEntry* uglist, agent* agents){
-	int index = (blockDim.x * blockIdx.x) + threadIdx.x;
 
-	if (index < numAgents){
-		UGEntry ug;
-		ug.agentId = agents[index].id;
-		ug.cellId = getIdFromCell(getGridCell(NNRADIUS, agents[index]));
-		uglist[index] = ug;
-	}
-}
 
 /*******************
 * Helper functions *
@@ -362,7 +361,7 @@ __global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
 
 		agents[index].radius = radius;
 		agents[index].id = index;
-
+		
 		/*
 		agents[index].pos.x -= 30; //30 btwn circles
 		agents[index].pos.y -= 30;
@@ -370,12 +369,12 @@ __global__ void kernInitAgents(int N, agent* agents, float scale, float radius){
 		agents[index].goal.y -= 30;
 
 		int shift = index / 20;
-		agents[index].pos.x += shift * 25;
-		agents[index].pos.y += shift * 25;
-		agents[index].goal.x += shift * 25;
-		agents[index].goal.y += shift * 25;
+		int mul = 20;
+		agents[index].pos.x += shift * mul;
+		agents[index].pos.y += shift * mul;
+		agents[index].goal.x += shift * mul;
+		agents[index].goal.y += shift * mul;
 		*/
-
 	}
 }
 
@@ -393,12 +392,14 @@ void ClearPath::initSimulation(int N) {
 	kernInitAgents<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents, scene_scale, robot_radius);
 	checkCUDAErrorWithLine("kernInitAgents failed!");
 
+
+
     cudaThreadSynchronize();
 }
 
-/******************
+/*******************
  * copyAgentsToVBO *
- ******************/
+ *******************/
 
 /**
  * Copy the agent positions into the VBO so that they can be drawn by OpenGL.
@@ -441,9 +442,9 @@ void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec3* pos, agent* agents, H
     cudaThreadSynchronize();
 }
 
-/******************
+/*************************
 * Common Utility Kernels *
-******************/
+**************************/
 
 struct is_true{
 	__host__ __device__ bool operator()(const bool x){
@@ -476,9 +477,9 @@ __global__ void kernGather(int N, int* output, int* input, bool* indicators, int
 	}
 }
 
-/******************
+/********************
 * Common VO Kernels *
-******************/
+*********************/
 
 
 __global__ void kernUpdatePos(int N, float dt, agent* dev_agents, glm::vec3 *dev_pos){
@@ -585,9 +586,9 @@ __global__ void kernUpdateDesVelCollision(int N, agent* agents, int* neighbors){
 	}
 }
 
-/******************
+/***************
 * HRVO Kernels *
-******************/
+****************/
 
 __global__ void kernComputeHRVOs(int totHRVOs, int numHRVOs, int numAgents, HRVO* hrvos, int* agent_ids, agent* agents, int* neighbors, float dt){
 	// Get all RVOs in parallel
@@ -901,9 +902,111 @@ __global__ void kernGetSubsetIdxes(int numAgents, int* idxes, bool* indicators, 
 }
 
 
-/******************
+/*********************************
+* Nearest Neighbors CPU Versions *
+**********************************/
+
+void kernComputeNeighbors(int N, int* neighbors, int* num_neighbors, agent* agents){
+	for (int index = 0; index < N; index++){
+		int maxNeighbors = N - 1;
+		int numNeighbors = 0;
+		// i represents id of the neighbor
+		for (int i = 0; i < N; i++){
+			if (i == index) continue;
+			if (glm::length(agents[index].pos - agents[i].pos) < NNRADIUS){
+				neighbors[numNeighbors + index*maxNeighbors] = i;
+				numNeighbors++;
+			}
+		}
+		num_neighbors[index] = numNeighbors;
+	}
+}
+
+void updateUniformGrid(int numAgents, UGEntry* uglist, agent* agents){
+	for (int index = 0; index < numAgents; index++){
+		UGEntry ug;
+		ug.agentId = agents[index].id;
+		ug.cellId = getIdFromCell(getGridCell(NNRADIUS, agents[index]));
+		uglist[index] = ug;
+	}
+}
+
+void initStartIdxes(int numIdx, int* startIdx){
+	for (int i = 0; i < numIdx; i++){
+		startIdx[i] = -1;
+	}
+}
+
+void computeUGNeighbors(int numAgents, int max_num_neighbors, int* neighbors, int* max_neighbors, agent* agents, int* startIdx, UGEntry* ug_list){
+	for (int index = 0; index < numAgents; index++){
+		Cell cell = getGridCell(NNRADIUS, agents[index]);
+		int dxs[9] = { -1, 0, 1, -1, 0, 1, -1, 0, 1 };
+		int dys[9] = { -1, -1, -1, 0, 0, 0, 1, 1, 1 };
+
+		int max_n = 0;
+
+		Cell ncell;
+		for (int i = 0; i < 9; i++){
+			int dx = dxs[i];
+			int dy = dys[i];
+
+			ncell.x = cell.x + dx;
+			ncell.y = cell.y + dy;
+
+			if (ncell.x < 0 || ncell.y < 0 || ncell.x >= GRIDMAX || ncell.y >= GRIDMAX){
+				continue;
+			}
+
+			int ncellId = getIdFromCell(ncell);
+
+			int start = startIdx[ncellId];
+			if (start < 0) continue; // No agents in this cell
+
+			for (int j = start; j < numAgents; j++){
+				int oagentId = ug_list[j].agentId;
+				if (oagentId == index) continue; // Skip if it's myself
+				if (ug_list[j].cellId != ncellId) break; // Hit the end of these
+
+				if (glm::distance(agents[oagentId].pos, agents[index].pos) < NNRADIUS){
+					neighbors[index*max_num_neighbors + max_n] = oagentId;
+					max_n++;
+				}
+			}
+		}
+		max_neighbors[index] = max_n;
+	}
+}
+
+void UGStartIdxes(int numAgents, int* startIdx, UGEntry* ug_list){
+	for (int index = 0; index < numAgents; index++){
+		int idx = ug_list[index].cellId;
+
+		if (index == 0){
+			startIdx[idx] = index;
+		}
+		else {
+			int idx_prev = ug_list[index - 1].cellId;
+			// Note: Race condition happens if we do not block off other threads from writing to here
+			if (idx_prev != idx){
+				startIdx[idx] = index;
+			}
+		}
+	}
+}
+
+/***********************
 * Uniform Grid Kernels *
-******************/
+************************/
+__global__ void kernUpdateUniformGrid(int numAgents, UGEntry* uglist, agent* agents){
+	int index = (blockDim.x * blockIdx.x) + threadIdx.x;
+
+	if (index < numAgents){
+		UGEntry ug;
+		ug.agentId = agents[index].id;
+		ug.cellId = getIdFromCell(getGridCell(NNRADIUS, agents[index]));
+		uglist[index] = ug;
+	}
+}
 
 __global__ void kernInitStartIdxes(int numIdx, int* startIdx){
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -985,16 +1088,16 @@ __global__ void kernUGStartIdxes(int numAgents, int* startIdx, UGEntry* ug_list)
  */
 void ClearPath::stepSimulation(float dt, int iter) {
 
-	cudaEvent_t start, stop;
-	cudaEventCreate(&start);
-	cudaEventCreate(&stop);
-	cudaEventRecord(start);
+	//cudaEvent_t start, stop;
+	//cudaEventCreate(&start);
+	//cudaEventCreate(&stop);
+	//cudaEventRecord(start);
 
 	dim3 fullBlocksPerGrid((numAgents + blockSize - 1) / blockSize);
 
 	// Update all the desired velocities given current positions
-	kernUpdateDesVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents);
-	//kernUpdateDesVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents, iter);
+	//kernUpdateDesVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents);
+	kernUpdateDesVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents, iter);
 
 	// Allocate space for neighbors, FVOs, intersection points (how to do this?)
 	numNeighbors = numAgents - 1;
@@ -1029,7 +1132,13 @@ void ClearPath::stepSimulation(float dt, int iter) {
 	cudaMalloc((void**)&dev_neighbor_counts, sizeof(int)*numAgents);
 
 
-	// Compute Neighbors with the Uniform Grid (UG)
+
+	// Compute Neighbors with GPU Uniform Grid
+#ifdef CUDA_UG
+	cudaEvent_t startUG, stopUG;
+	cudaEventCreate(&startUG);
+	cudaEventCreate(&stopUG);
+	cudaEventRecord(startUG);
 	kernUpdateUniformGrid<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_uglist, dev_agents);
 	//cudaThreadSynchronize();
 
@@ -1043,8 +1152,69 @@ void ClearPath::stepSimulation(float dt, int iter) {
 
 	// Get the neighbors
 	kernComputeUGNeighbors<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_ug_neighbors, dev_num_neighbors, dev_agents, dev_startIdx, dev_uglist);
+	
+	cudaEventRecord(stopUG);
+	cudaEventSynchronize(stopUG);
+	float millisecondsUG = 0;
+	cudaEventElapsedTime(&millisecondsUG, startUG, stopUG);
+	printf("UG: %f\n", millisecondsUG);
+#endif
+
+	// Compute Neighbors with CPU Uniform Grid
+#ifdef CPU_UG
+	hst_agents_ = (agent*)malloc(numAgents*sizeof(agent));
+
+	hst_uglist_ = (UGEntry*)malloc(numAgents*sizeof(UGEntry));
+	hst_startIdx_ = (int*)malloc(GRIDMAX*GRIDMAX*sizeof(int));
+	hst_ug_neighbors_ = (int*)malloc((numAgents - 1)*numAgents*sizeof(int));
+	hst_num_neighbors_ = (int*)malloc(numAgents*sizeof(int));
+
+	cudaMemcpy(hst_agents_, dev_agents, numAgents*sizeof(agent), cudaMemcpyDeviceToHost);
+
+	updateUniformGrid(numAgents, hst_uglist_, hst_agents_);
+	thrust::sort(thrust::host, hst_uglist_, hst_uglist_+numAgents, UGComp());
+
+	initStartIdxes(GRIDMAX*GRIDMAX, hst_startIdx_);
+	UGStartIdxes(numAgents, hst_startIdx_, hst_uglist_);
+	computeUGNeighbors(numAgents, numNeighbors, hst_ug_neighbors_, hst_num_neighbors_, hst_agents_, hst_startIdx_, hst_uglist_);
+
+	cudaMemcpy(dev_ug_neighbors, hst_ug_neighbors_, numAgents*numNeighbors*sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpy(dev_num_neighbors, hst_num_neighbors_, numAgents*sizeof(int), cudaMemcpyHostToDevice);
+#endif
+
+#ifdef GPU_NN
+
+	cudaEvent_t startN, stopN;
+	cudaEventCreate(&startN);
+	cudaEventCreate(&stopN);
+	cudaEventRecord(startN);
 
 	kernComputeNeighbors<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_ug_neighbors, dev_num_neighbors, dev_agents);
+
+	cudaEventRecord(stopN);
+	cudaEventSynchronize(stopN);
+	float millisecondsN = 0;
+	cudaEventElapsedTime(&millisecondsN, startN, stopN);
+	printf("No grid: %f\n", millisecondsN);
+
+#endif
+
+#ifdef CPU_NN
+
+	cudaEvent_t startN, stopN;
+	cudaEventCreate(&startN);
+	cudaEventCreate(&stopN);
+	cudaEventRecord(startN);
+
+	kernComputeNeighbors << <fullBlocksPerGrid, blockSize >> >(numAgents, dev_ug_neighbors, dev_num_neighbors, dev_agents);
+
+	cudaEventRecord(stopN);
+	cudaEventSynchronize(stopN);
+	float millisecondsN = 0;
+	cudaEventElapsedTime(&millisecondsN, startN, stopN);
+	printf("No grid: %f\n", millisecondsN);
+
+#endif
 
 	// Compute the unique neighbor counts
 	cudaMemcpy(dev_neighbor_counts, dev_num_neighbors, sizeof(int)*numAgents, cudaMemcpyDeviceToDevice);
@@ -1141,7 +1311,7 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		dim3 fullBlocksForHRVOs((totHRVOs + blockSize - 1) / blockSize);
 		dim3 fullBlocksForCandidates((totCandidates + blockSize - 1) / blockSize);
 
-		printf("Candidates: %d,  blocks: %d\n", totCandidates, fullBlocksForCandidates.y);
+		//printf("Candidates: %d,  blocks: %d\n", totCandidates, fullBlocksForCandidates.x);
 
 		kernGetSubsetIdxes<<<fullBlocksPerGrid,blockSize>>>(numAgents, dev_idx, dev_indicators, dev_indicator_sum, dev_agents);
 		checkCUDAErrorWithLine("cudaMalloc subset idxes failed!");
@@ -1184,10 +1354,10 @@ void ClearPath::stepSimulation(float dt, int iter) {
 	// Update the positions
 	kernUpdatePos<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents, dev_pos);
 
-	cudaEventRecord(stop);
-	cudaEventSynchronize(stop);
-	float milliseconds = 0;
-	cudaEventElapsedTime(&milliseconds, start, stop);
+	//cudaEventRecord(stop);
+	//cudaEventSynchronize(stop);
+	//float milliseconds = 0;
+	//cudaEventElapsedTime(&milliseconds, start, stop);
 	//printf("%f\n", milliseconds);
 
 }
