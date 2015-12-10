@@ -14,7 +14,7 @@
 
 #define VISUALIZE 1
 
-const int N_FOR_VIS = 30;
+const int N_FOR_VIS = 40;
 const float DT = 0.02f; //TODO: 30 with 0.02
 
 glm::vec3* hst_pos;

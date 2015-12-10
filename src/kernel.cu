@@ -53,10 +53,10 @@ void checkCUDAError(const char *msg, int line = -1) {
 /*! Block size used for CUDA kernel launch. */
 #define blockSize 128
 #define robot_radius 0.5 // 0.5 default
-#define circle_radius 10 // 10 for 30 robots
+#define circle_radius 20 // 10 for 30 robots
 #define desired_speed 3.0f // 3.0 default
 
-#define GRIDMAX 20 // Must be even, creates grid of GRIDMAX x GRIDMAX size
+#define GRIDMAX 40 // Must be even, creates grid of GRIDMAX x GRIDMAX size
 #define NNRADIUS 2.0f // 2.0 default
 
 // Experimental sampling
@@ -149,6 +149,10 @@ __global__ void kernUpdateUniformGrid(int numAgents, UGEntry* uglist, agent* age
 /*******************
 * Helper functions *
 ********************/
+
+__host__ __device__ float sqr(glm::vec3 a){
+	return glm::dot(a, a);
+}
 
 __host__ __device__ float det2(glm::vec3 a, glm::vec3 b){
 	// Determinant of 2 vectors (only uses the 2D, x and y components)
@@ -585,18 +589,81 @@ __global__ void kernComputeNaiveCandidateVels(int totHRVOs, int numAgents, int n
 
 		if (dot1 > 0.0f && det2(hrvos[index].right, prefVel-hrvos[index].apex) > 0.0f){
 			candidate.vel = hrvos[index].apex + dot1*hrvos[index].right;
-			candidate.distToPref = glm::length(prefVel - candidate.vel);
+			candidate.distToPref = sqr(prefVel - candidate.vel);
 			candidate.valid = true;
-			candidates[r*numCandidates + 2 * c] = candidate;
+			if(glm::length(candidate.vel) <= MAX_VEL) candidates[r*numCandidates + 2 * c] = candidate;
 		}
 
 		if (dot2 > 0.0f && det2(hrvos[index].left, prefVel - hrvos[index].apex) < 0.0f){
 			candidate.vel = hrvos[index].apex + dot2*hrvos[index].left;
-			candidate.distToPref = glm::length(prefVel - candidate.vel);
+			candidate.distToPref = sqr(prefVel - candidate.vel);
 			candidate.valid = true;
-			candidates[r*numCandidates + 2 * c + 1] = candidate;
+			if (glm::length(candidate.vel) <= MAX_VEL) candidates[r*numCandidates + 2 * c + 1] = candidate;
 		}
 
+	}
+}
+
+__global__ void kernComputeMaxCandidateVels(int totHRVOs, int numAgents, int numHRVOs, int numCandidates, int offset, CandidateVel* candidates, HRVO* hrvos, int* agent_ids, agent* agents){
+	// Intersect circle around each agent with HRVOS (get max velocities along the HRVOs)
+
+	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	if (index < totHRVOs){
+		int r = index / numHRVOs;
+		int c = index % numHRVOs;
+
+		int agent_id = agent_ids[r];
+
+		glm::vec3 prefVel = agents[agent_id].vel;
+
+		CandidateVel candidate;
+		candidate.hrvo1 = INT_MAX;
+		candidate.hrvo2 = c;
+
+		float discriminant = MAX_VEL * MAX_VEL - det2(hrvos[index].apex, hrvos[index].right)*det2(hrvos[index].apex, hrvos[index].right);
+
+		if (discriminant > 0.0f) {
+
+			float t1 = -(glm::dot(hrvos[index].apex, hrvos[index].right)) + glm::sqrt(discriminant);
+			float t2 = -(glm::dot(hrvos[index].apex, hrvos[index].right)) - std::sqrt(discriminant);
+
+			if (t1 >= 0.0f) {
+				candidate.vel = hrvos[index].apex + t1*hrvos[index].right;
+				candidate.distToPref = sqr(candidate.vel - prefVel);
+				candidate.valid = true;
+				candidates[r*numCandidates + offset + 4*c] = candidate;
+			}
+
+			if (t2 >= 0.0f) {
+				candidate.vel = hrvos[index].apex + t2*hrvos[index].right;
+				candidate.distToPref = sqr(candidate.vel - prefVel);
+				candidate.valid = true;
+				candidates[r*numCandidates + offset + 4 * c + 1] = candidate;
+			}
+		}
+
+		discriminant = MAX_VEL * MAX_VEL - det2(hrvos[index].apex, hrvos[index].left)*det2(hrvos[index].apex, hrvos[index].left);
+
+		if (discriminant > 0.0f) {
+
+			float t1 = -(glm::dot(hrvos[index].apex, hrvos[index].left)) + glm::sqrt(discriminant);
+			float t2 = -(glm::dot(hrvos[index].apex, hrvos[index].left)) - std::sqrt(discriminant);
+
+			if (t1 >= 0.0f) {
+				candidate.vel = hrvos[index].apex + t1*hrvos[index].left;
+				candidate.distToPref = sqr(candidate.vel - prefVel);
+				candidate.valid = true;
+				candidates[r*numCandidates + offset + 4 * c + 2] = candidate;
+			}
+
+			if (t2 >= 0.0f) {
+				candidate.vel = hrvos[index].apex + t2*hrvos[index].left;
+				candidate.distToPref = sqr(candidate.vel - prefVel);
+				candidate.valid = true;
+				candidates[r*numCandidates + offset + 4 * c + 3] = candidate;
+			}
+		}
 	}
 }
 
@@ -635,9 +702,9 @@ __global__ void kernComputeIntersectionCandidateVels(int totHRVOs, int numAgents
 				
 				if (s >= 0.0f && t >= 0.0f){
 					candidate.vel = hrvos[index].apex + s*hrvos[index].right;
-					candidate.distToPref = glm::length(prefVel - candidate.vel);
+					candidate.distToPref = sqr(prefVel - candidate.vel);
 					candidate.valid = true;
-					candidates[r*numCandidates + offset + (4*(numHRVOs-1))*c + 4*n] = candidate;
+					if (glm::length(candidate.vel) <= MAX_VEL) candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n] = candidate;
 				}
 			}
 
@@ -650,9 +717,9 @@ __global__ void kernComputeIntersectionCandidateVels(int totHRVOs, int numAgents
 
 				if (s >= 0.0f && t >= 0.0f){
 					candidate.vel = hrvos[index].apex + s*hrvos[index].left;
-					candidate.distToPref = glm::length(prefVel - candidate.vel);
+					candidate.distToPref = sqr(prefVel - candidate.vel);
 					candidate.valid = true;
-					candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n + 1] = candidate;
+					if (glm::length(candidate.vel) <= MAX_VEL) candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n + 1] = candidate;
 				}
 			}
 
@@ -665,9 +732,9 @@ __global__ void kernComputeIntersectionCandidateVels(int totHRVOs, int numAgents
 
 				if (s >= 0.0f && t >= 0.0f){
 					candidate.vel = hrvos[index].apex + s*hrvos[index].right;
-					candidate.distToPref = glm::length(prefVel - candidate.vel);
+					candidate.distToPref = sqr(prefVel - candidate.vel);
 					candidate.valid = true;
-					candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n + 2] = candidate;
+					if (glm::length(candidate.vel) <= MAX_VEL) candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n + 2] = candidate;
 				}
 			}
 
@@ -680,9 +747,9 @@ __global__ void kernComputeIntersectionCandidateVels(int totHRVOs, int numAgents
 
 				if (s >= 0.0f && t >= 0.0f){
 					candidate.vel = hrvos[index].apex + s*hrvos[index].left;
-					candidate.distToPref = glm::length(prefVel - candidate.vel);
+					candidate.distToPref = sqr(prefVel - candidate.vel);
 					candidate.valid = true;
-					candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n + 3] = candidate;
+					if (glm::length(candidate.vel) <= MAX_VEL) candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n + 3] = candidate;
 				}
 			}
 
@@ -874,7 +941,8 @@ void ClearPath::stepSimulation(float dt, int iter) {
 	dim3 fullBlocksPerGrid((numAgents + blockSize - 1) / blockSize);
 
 	// Update all the desired velocities given current positions
-	kernUpdateDesVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents);
+	kernUpdateDesVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents, iter); // for random
+	//kernUpdateDesVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents);
 
 	// Allocate space for neighbors, FVOs, intersection points (how to do this?)
 	numNeighbors = numAgents - 1;
@@ -928,7 +996,6 @@ void ClearPath::stepSimulation(float dt, int iter) {
 	// Get the neighbors
 	kernComputeUGNeighbors<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_ug_neighbors, dev_num_neighbors, dev_agents, dev_startIdx, dev_uglist);
 
-	
 	int* dev_neighbor_counts;
 	int* dev_neighbor_counts_end;
 	cudaMalloc((void**)&dev_neighbor_counts, sizeof(int)*numAgents);
@@ -1033,8 +1100,9 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		numHRVOs = n;
 		totHRVOs = num_sub_agents*n;
 		int numNaiveCandidates = 2 * numHRVOs;
+		int numMaxVelCandidates = 4 * numHRVOs;
 		int numIntersectionCandidates = 4 * numHRVOs * (numHRVOs - 1);
-		numCandidates = numNaiveCandidates + numIntersectionCandidates;
+		numCandidates = numNaiveCandidates + numMaxVelCandidates + numIntersectionCandidates;
 		totCandidates = num_sub_agents * numCandidates;
 
 		dim3 fullBlocksForHRVOs((totHRVOs + blockSize - 1) / blockSize);
@@ -1057,7 +1125,10 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		kernComputeNaiveCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, num_sub_agents, numHRVOs, numCandidates, dev_candidates, dev_hrvos, dev_agent_ids, dev_agents);
 		checkCUDAErrorWithLine("cudaMalloc naive vels failed!");
 
-		kernComputeIntersectionCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, num_sub_agents, numHRVOs, numCandidates, numNaiveCandidates, dev_candidates, dev_hrvos, dev_agent_ids, dev_agents);
+		kernComputeMaxCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, num_sub_agents, numHRVOs, numCandidates, numNaiveCandidates, dev_candidates, dev_hrvos, dev_agent_ids, dev_agents);
+		checkCUDAErrorWithLine("cudaMalloc max vels failed!");
+
+		kernComputeIntersectionCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, num_sub_agents, numHRVOs, numCandidates, numNaiveCandidates+numMaxVelCandidates, dev_candidates, dev_hrvos, dev_agent_ids, dev_agents);
 		checkCUDAErrorWithLine("cudaMalloc intersection vels failed!");
 
 		kernComputeValidCandidateVels<<<fullBlocksForCandidates, blockSize>>>(totCandidates, num_sub_agents, numHRVOs, numCandidates, dev_candidates, dev_hrvos, dev_agents);
@@ -1071,7 +1142,6 @@ void ClearPath::stepSimulation(float dt, int iter) {
 
 		kernUpdateVel<<<fullBlocksPerGrid, blockSize>>>(num_sub_agents, dev_agent_ids, dev_agents, dev_in_pcr, dev_vel_new);
 		checkCUDAErrorWithLine("cudaMalloc update vels failed!");
-
 	}
 
 	agent* hst_agents = (agent*)malloc(numAgents*sizeof(agent));

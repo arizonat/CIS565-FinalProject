@@ -32,12 +32,12 @@ const unsigned int PROG_LINE = 1;
 
 glm::vec2* hst_endpoints;
 
-const float fovy = (float) (PI / 4);
+const float fovy = (float) (PI / 2);
 const float zNear = 0.10f;
-const float zFar = 50.0f;
+const float zFar = 1000.0f;
 
 glm::mat4 projection;
-glm::vec3 cameraPosition(0.0, 0.1, 30);
+glm::vec3 cameraPosition(0.0, 0.1, 10);
 
 //====================================
 // Main
