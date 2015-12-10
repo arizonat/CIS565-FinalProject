@@ -37,7 +37,7 @@ const float zNear = 0.10f;
 const float zFar = 1000.0f;
 
 glm::mat4 projection;
-glm::vec3 cameraPosition(0.0, 0.1, 10);
+glm::vec3 cameraPosition(0.0, 0.1, 30);
 
 //====================================
 // Main
