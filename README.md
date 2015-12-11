@@ -26,11 +26,17 @@ Special thanks to the authors: Prof. Stephen Guy and Prof. Ming Lin
 
 ## Final Algorithm Overview
 
+![](img/hrvo_30.PNG)
+
+![](img/hrvo_38_random.PNG)
+
 The general approach to all of the above algorithms for collision avoidance is to model all velocities of every agent that *will* results in a collision. Then, if the current velocity is inside the set of colliding-velocities, to find the velocity nearest to the original, but is no longer in the set of colliding velocities.
 
 ## Things I tried
 
 #### FVO with ClearPath
+
+![](img/fvo_3.PNG)
 
 For my first attempt, I implemented the algorithm from the **ClearPath paper**, including FVOs (3 constraints), and the full intersection computation and inside/outside classifications. The full code for this implementation is available at commit aab96587f677be6439d2f293825ed827a7786f8d.
 
@@ -40,6 +46,8 @@ As clarified by Prof. Guy, is highly susceptible to floating point issues when u
 and here it is breaking on 4: https://www.youtube.com/watch?v=BA9yAxEHa7g
 
 #### RVO with randomly sampled velocities
+
+![](img/rvo_6.PNG)
 
 For my second attempt, I implemented the algorithm from the **RVO paper**. Here the difference is that we no longer compute intersection points and find velocities along the boundaries. Instead we compute the velcoity regions that result in collisions as before, but for each agent we randomly sample _N_ velocities (I used _N_ = 250 as in the paper). We then select the velocity that is nearest to the desired velocity AND is not inside the colliding regions. This resulted in a slightly easier-to-compute algorithm and worked fairly well for up to 6 robots: . Beyond that it seemed to give strange results.
 
