@@ -14,7 +14,7 @@ void main() {
     //vec4 pos = vec4(0,0,0,1);  //introduce a single vertex at the origin
     //pos = u_projMatrix * pos;
     vec4 new_pos;
-    float radius = 0.5;
+    float radius = 0.4;
 
     for(float i = 0; i < 6.38 ; i+=0.1)  //generate vertices at positions on the circumference from 0 to 2*pi
     {

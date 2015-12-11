@@ -1,9 +1,8 @@
 /**
  * @file      main.cpp
- * @brief     Example N-body simulation for CIS 565
- * @authors   Liam Boone, Kai Ninomiya
- * @date      2013-2015
- * @copyright University of Pennsylvania
+ * @brief     CIS565 Final Project - HRVO and ClearPath on CUDA
+ * @authors   Levi (Veevee) Cai, framework from: Liam Boone, Kai Ninomiya
+ * @date      2015
  */
 
 #include "main.hpp"
@@ -13,6 +12,9 @@
 // ================
 
 #define VISUALIZE 1
+
+#define SHOW_HRVOS
+#define SHOW_VELOCITIES
 
 const int N_FOR_VIS = 200;
 const float DT = 0.05f; //TODO: 30 with 0.02
@@ -280,37 +282,33 @@ void mainLoop() {
 		glColor3f(1.0, 0.0, 0.0);
 
 		// Mark robot of focus
-		glVertex2f(hst_pos[0].x,hst_pos[0].y);
-		glVertex2f(hst_pos[0].x+2, hst_pos[0].y+2);
+		int robot = 0;
+		glVertex2f(hst_pos[robot].x,hst_pos[robot].y);
+		glVertex2f(hst_pos[robot].x+2, hst_pos[robot].y+2);
 
+#ifdef SHOW_HRVOS
 		// Draw HRVOs
-		/*
-		for (int i = 0; i < N_FOR_VIS - 1; i++){
-			glm::vec3 apex = hst_agents[0].pos + hst_hrvos[i].apex;
+		for (int i = 0; i < hst_num_neighbors[robot]; i++){
+			glm::vec3 apex = hst_agents[robot].pos + hst_hrvos[i].apex;
 			glVertex2f(apex.x, apex.y);
 			glVertex2f(apex.x + 5.0*hst_hrvos[i].left.x, apex.y + 5.0*hst_hrvos[i].left.y);
 			glVertex2f(apex.x, apex.y);
 			glVertex2f(apex.x + 5.0*hst_hrvos[i].right.x, apex.y + 5.0*hst_hrvos[i].right.y);
 		}
-		*/
+#endif
 
+#ifdef SHOW_VELOCITIES
 		// Draw velocity vectors
-		/*
 		glColor3f(1.0, 1.0, 0.0);
 		for (int i = 0; i < N_FOR_VIS; i++){
 			glVertex2f(hst_agents[i].pos.x, hst_agents[i].pos.y);
 			glVertex2f(hst_agents[i].pos.x+hst_agents[i].vel.x, hst_agents[i].pos.y+hst_agents[i].vel.y);
 		}
-
-		for (int i = 0; i < N_FOR_VIS; i++){
-			printf("%d ", hst_num_neighbors[i]);
-		}
-		printf("\n");
-		*/
+#endif
 
 		// Draw neighbors for the first robot
 		glColor3f(0.0, 1.0, 0.0);
-		int robot = 0;
+
 		for (int i = 0; i < hst_num_neighbors[robot]; i++){
 			int n = hst_neighbors[robot*(N_FOR_VIS-1) + i];
 			glVertex2f(hst_agents[n].pos.x, hst_agents[n].pos.y);

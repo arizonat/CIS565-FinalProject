@@ -15,23 +15,37 @@
 #include <glm/gtc/constants.hpp>
 #include "utilityCore.hpp"
 #include "kernel.h"
-
-//#include <chrono>
+#include <chrono>
 //#include <vector>
 
-#define checkCUDAErrorWithLine(msg) checkCUDAError(msg, __LINE__)
-
-#define sign(x) (x>0)-(x<0)
-
+/*****************
+* Configuration *
+*****************/
 #define CUDA_UG
 //#define CUDA_NN
 //#define CPU_UG
 //#define CPU_NN
 
-//#define INFINITY 0x7f800000
-#define NEG_INFINITY 0xff800000
+#define USE_RANDOM_VELS
 
-//#define MAX_NEIGHBORS 10
+/*! Block size used for CUDA kernel launch. */
+#define blockSize 1024 //128
+#define robot_radius 0.5 // 0.5 default
+#define circle_radius 40 // 10 for 30 robots, 30 for 100 robots
+#define desired_speed 3.0f // 3.0 default
+
+#define GRIDMAX 50 // Must be even, creates grid of GRIDMAX x GRIDMAX size
+
+#define NNRADIUS 3.0f // 2.0 default, 1.5 for 100 robots, 3.0 for 200 with random
+
+// Experimental sampling
+#define MAX_VEL 4.0f // 3.0 default
+
+#define checkCUDAErrorWithLine(msg) checkCUDAError(msg, __LINE__)
+
+#define sign(x) (x>0)-(x<0)
+
+#define NEG_INFINITY 0xff800000
 
 using namespace ClearPath;
 
@@ -48,23 +62,6 @@ void checkCUDAError(const char *msg, int line = -1) {
         exit(EXIT_FAILURE);
     }
 }
-
-/*****************
-* Configuration *
-*****************/
-
-/*! Block size used for CUDA kernel launch. */
-#define blockSize 1024 //128
-#define robot_radius 0.5 // 0.5 default
-#define circle_radius 40 // 10 for 30 robots, 30 for 100 robots
-#define desired_speed 3.0f // 3.0 default
-
-#define GRIDMAX 50 // Must be even, creates grid of GRIDMAX x GRIDMAX size
-
-#define NNRADIUS 3.0f // 2.0 default, 1.5 for 100 robots
-
-// Experimental sampling
-#define MAX_VEL 4.0f // 3.0 default
 
 /**********************************************
 * Kernel state (pointers are device pointers) *
@@ -465,8 +462,8 @@ void ClearPath::copyAgentsToVBO(float *vbodptr, glm::vec3* pos, agent* agents, H
 	cudaMemcpy(num_neighbors, dev_num_neighbors, numAgents*sizeof(int), cudaMemcpyDeviceToHost);
 
 	// HRVOs
-	//cudaMemcpy(hrvos, dev_hrvos, totHRVOs*sizeof(HRVO), cudaMemcpyDeviceToHost);
-	//cudaMemcpy(candidates, dev_candidates, totCandidates*sizeof(CandidateVel), cudaMemcpyDeviceToHost);
+	cudaMemcpy(hrvos, dev_hrvos, totHRVOs*sizeof(HRVO), cudaMemcpyDeviceToHost);
+	cudaMemcpy(candidates, dev_candidates, totCandidates*sizeof(CandidateVel), cudaMemcpyDeviceToHost);
 
     cudaThreadSynchronize();
 }
@@ -1099,58 +1096,14 @@ __global__ void kernUGStartIdxes(int numAgents, int* startIdx, UGEntry* ug_list)
  */
 void ClearPath::stepSimulation(float dt, int iter) {
 
-	glm::vec3 prefVel = glm::vec3(2.5f, 3.0f, 0.0f);
-	glm::vec3 apex = glm::vec3(2.0, 2.0, 0.0);
-	glm::vec3 left = glm::normalize(glm::vec3(-0.5, 1.0, 0.0));
-	glm::vec3 right = glm::normalize(glm::vec3(0.5, 1.0, 0.0));
-
-	float s;
-	float t;
-	bool intersects = intersectRaySphere(apex, left, glm::vec3(0.0, 0.0, 0.0), 3.0f*3.0f, s, t);
-
-
-
-	/*
-	glm::vec3 prefVel = glm::vec3(2.5f, 3.0f, 0.0f);
-	glm::vec3 apex = glm::vec3(3.0, 2.0, 0.0);
-	glm::vec3 left = glm::normalize(glm::vec3(-0.5,1.0,0.0));
-	glm::vec3 right = glm::normalize(glm::vec3(0.5, 1.0, 0.0));
-
-	float dot1 = glm::dot(prefVel - apex, right);
-	float dot2 = glm::dot(prefVel - apex, left);
-
-	glm::vec3 resultOnRight;
-	glm::vec3 resultOnLeft;
-
-	if (dot1 > 0.0f && det2(right, prefVel - apex) > 0.0f){
-		resultOnRight = apex + dot1*right;
-
-	}
-
-	if (dot2 > 0.0f && det2(left, prefVel - apex) < 0.0f){
-		resultOnLeft = apex + dot2*left;
-	}
-
-	printf("right: (%f, %f, %f)\n", resultOnRight.x, resultOnRight.y, resultOnRight.z);
-	printf("left: (%f, %f, %f)\n", resultOnLeft.x, resultOnLeft.y, resultOnLeft.z);
-
-	Ray r;
-	r.pos = apex;
-	r.dir = left;
-	glm::vec3 pointOnLeft = projectPointToRay(r, prefVel);
-	r.pos = apex;
-	r.dir = right;
-	glm::vec3 pointOnRight = projectPointToRay(r, prefVel);
-
-	printf("right mine: (%f, %f, %f)\n", pointOnRight.x, pointOnRight.y, pointOnRight.z);
-	printf("left mine: (%f, %f, %f)\n", pointOnLeft.x, pointOnLeft.y, pointOnLeft.z);
-	*/
-
 	dim3 fullBlocksPerGrid((numAgents + blockSize - 1) / blockSize);
 
 	// Update all the desired velocities given current positions
-	//kernUpdateDesVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents);
+#ifdef USE_RANDOM_VELS
 	kernUpdateDesVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents, iter);
+#else
+	kernUpdateDesVel<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents);
+#endif
 
 	// Allocate space for neighbors, FVOs, intersection points (how to do this?)
 	numNeighbors = numAgents - 1;
@@ -1182,8 +1135,6 @@ void ClearPath::stepSimulation(float dt, int iter) {
 	int* dev_neighbor_counts;
 	int* dev_neighbor_counts_end;
 	cudaMalloc((void**)&dev_neighbor_counts, sizeof(int)*numAgents);
-
-
 
 	// Compute Neighbors with GPU Uniform Grid
 #ifdef CUDA_UG
@@ -1379,8 +1330,7 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		dim3 fullBlocksForCandidates((totCandidates + blockSize - 1) / blockSize);
 
 		//printf("Candidates: %d,  blocks: %d\n", totCandidates, fullBlocksForCandidates.x);
-
-		printf("-----Num Neighbors: %d-----\n",n);
+		//printf("-----Num Neighbors: %d-----\n",n);
 
 		kernGetSubsetIdxes<<<fullBlocksPerGrid,blockSize>>>(numAgents, dev_idx, dev_indicators, dev_indicator_sum, dev_agents);
 		checkCUDAErrorWithLine("cudaMalloc subset idxes failed!");
@@ -1391,24 +1341,8 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		kernGetSubsetNeighborIds<<<fullBlocksForNeighborIds, blockSize>>>(num_sub_agents*n, n, numNeighbors, dev_neighbor_ids, dev_ug_neighbors, dev_idx);
 		checkCUDAErrorWithLine("cudaMalloc subsetneighborsid failed!");
 
-		cudaEvent_t startHRVO, stopHRVO;
-		cudaEventCreate(&startHRVO);
-		cudaEventCreate(&stopHRVO);
-		cudaEventRecord(startHRVO);
-
 		kernComputeHRVOs<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, numHRVOs, num_sub_agents, dev_hrvos, dev_agent_ids, dev_agents, dev_neighbor_ids, dt);
 		checkCUDAErrorWithLine("cudaMalloc dev_goals failed!");
-
-		cudaEventRecord(stopHRVO);
-		cudaEventSynchronize(stopHRVO);
-		float millisecondsHRVO = 0;
-		cudaEventElapsedTime(&millisecondsHRVO, startHRVO, stopHRVO);
-		printf("HRVO: %f\n", millisecondsHRVO);
-
-		cudaEvent_t startCAN, stopCAN;
-		cudaEventCreate(&startCAN);
-		cudaEventCreate(&stopCAN);
-		cudaEventRecord(startCAN);
 
 		kernInitCandidateVels<<<fullBlocksForCandidates, blockSize>>>(totCandidates, dev_candidates);
 		checkCUDAErrorWithLine("cudaMalloc cand vels failed!");
@@ -1423,39 +1357,11 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		//kernComputeIntersectionCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, num_sub_agents, numHRVOs, numCandidates, numNaiveCandidates, dev_candidates, dev_hrvos, dev_agent_ids, dev_agents);
 		checkCUDAErrorWithLine("cudaMalloc intersection vels failed!");
 
-		cudaEventRecord(stopCAN);
-		cudaEventSynchronize(stopCAN);
-		float millisecondsCAN = 0;
-		cudaEventElapsedTime(&millisecondsCAN, startCAN, stopCAN);
-		printf("Candidates: %f\n", millisecondsCAN);
-
-		cudaEvent_t startVALID, stopVALID;
-		cudaEventCreate(&startVALID);
-		cudaEventCreate(&stopVALID);
-		cudaEventRecord(startVALID);
-
 		kernComputeValidCandidateVels<<<fullBlocksForCandidates, blockSize>>>(totCandidates, num_sub_agents, numHRVOs, numCandidates, dev_candidates, dev_hrvos, dev_agents);
 		checkCUDAErrorWithLine("cudaMalloc compute valid vels failed!");
 
-		cudaEventRecord(stopVALID);
-		cudaEventSynchronize(stopVALID);
-		float millisecondsVALID = 0;
-		cudaEventElapsedTime(&millisecondsVALID, startVALID, stopVALID);
-		printf("Computing Valid: %f\n", millisecondsVALID);
-
-		cudaEvent_t startBEST, stopBEST;
-		cudaEventCreate(&startBEST);
-		cudaEventCreate(&stopBEST);
-		cudaEventRecord(startBEST);
-
 		kernComputeBestVel<<<fullBlocksPerGrid, blockSize>>>(num_sub_agents, numCandidates, dev_vel_new, dev_candidates);
 		checkCUDAErrorWithLine("cudaMalloc best vels failed!");
-
-		cudaEventRecord(stopBEST);
-		cudaEventSynchronize(stopBEST);
-		float millisecondsBEST = 0;
-		cudaEventElapsedTime(&millisecondsBEST, startBEST, stopBEST);
-		printf("Selecting Best: %f\n", millisecondsBEST);
 
 		kernComputeInPCR<<<fullBlocksPerGrid, blockSize>>>(num_sub_agents, numHRVOs, dev_in_pcr, dev_hrvos, dev_agent_ids, dev_agents);
 		checkCUDAErrorWithLine("cudaMalloc in pcr failed!");
@@ -1466,7 +1372,5 @@ void ClearPath::stepSimulation(float dt, int iter) {
 
 	// Update the positions
 	kernUpdatePos<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents, dev_pos);
-
-
 
 }
