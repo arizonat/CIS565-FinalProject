@@ -93,7 +93,9 @@ Note: This is not heavily optimized and it not a particularly stable implementat
 
 Units on left are ms.
 
-It is fairly clear that the GPU here gives significant advantage over the CPU implementation for large numbers of agents, especially if they are fairly densely packed. However, for smaller numbers of agents, or for sparse settings, the advantage is not necessarily as clear and both can run at 30+ FPS fairly well (GPU at 60+ FPS for longer).
+DISCLAIMER: This was tested against Snape's implementation which uses a KD-tree spatial optimization (vs. my uniform grid), so this would need to be ignored/compared to be more accurate.
+
+The GPU here gives significant advantage over the CPU implementation for large numbers of agents, especially if they are fairly densely packed. However, for smaller numbers of agents, or for sparse settings, the advantage is not necessarily as clear and both can run at 30+ FPS fairly well (GPU at 60+ FPS for longer).
 
 ### Uniform Grid vs. Naive Nearest Neighbors on CUDA and CPU
 
