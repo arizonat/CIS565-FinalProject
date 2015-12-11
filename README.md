@@ -1,6 +1,6 @@
 # CIS565 Fall 2015 - Final Project
 
-# CUDA-accelerated Crowd Simulation with HRVO and ClearPath
+## CUDA-accelerated Crowd Simulation with HRVO and ClearPath
 
 Levi Cai
 
