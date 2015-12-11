@@ -11,7 +11,7 @@ Final video: https://www.youtube.com/watch?v=9E0RYBbbvJQ&feature=youtu.be
 Final presentation: https://docs.google.com/presentation/d/1MXH-gVVsqWDP741cm3D0KGq5vxWAhtXCxeXZsPsarFs/edit?usp=sharing
 
 Papers/Resources Used:
-* NOTE: Currently used intersection implementation from Snape's HRVO implementation: https://github.com/snape/HRVO
+* HRVO logic from Snape (NOTE: this does not actually follow "proper ClearPath"): https://github.com/snape/HRVO
 * ClearPath paper: http://gamma.cs.unc.edu/CA/ClearPath.pdf
 * General collision avoidance: http://gamma.cs.unc.edu/CA/
 * RVO paper: http://gamma.cs.unc.edu/RVO/
