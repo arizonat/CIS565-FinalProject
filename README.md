@@ -33,7 +33,28 @@ Special thanks to the authors: Prof. Stephen Guy and Prof. Ming Lin
 
 ### General Approach
 
-The general approach to all of the above algorithms for collision avoidance is to model all velocities of every agent that *will* results in a collision. Then, if the current velocity is inside the set of colliding-velocities, to find the velocity nearest to the original, but is no longer in the set of colliding velocities.
+The general approach to all of the above algorithms for collision avoidance is to model all velocities of every agent that *will* results in a collision. Then, if the current velocity is inside the set of colliding-velocities, to find the velocity nearest to the original, but is no longer in the set of colliding velocities. The primary differences between the 3 algorithms attempted here are what consistitutes the boundaries defining colliding/restricted velocities and how to compute the best velocity from the set of non-colliding velocities.
+
+The latest approach with the most stable results are provided by HRVO, and it is extended here on CUDA by utilizing ideas from the ClearPath paper and Snape's HRVO implementation. The algorithm is thus:
+
+Parallelized across agents:
+ * For each agent find its neighbors
+
+Parallelized across neighbors:
+* For each neighbor, compute the 
+* For each neighbor, compute the HRVO between the original agent and the neighbor
+
+Parallelized across HRVOs:
+* Compute the intersections between each HRVO with all boundaries of all other HRVOs
+* Compute the projection of the original agent's desired velocity onto all the boundaries relating to it
+* Compute the proejction of the maximum velocity of each agent onto all the boundaries relating to it
+* The resulting points are all the possible velocity candidates relating to their respective agents
+
+Parallelized across candidates:
+* Compute valid candidates (ones that are not inside any other HRVO region)
+
+Parallelized across agents:
+* From their respective candidate lists, pick the best valid candidate
 
 ### Optimizations
 
