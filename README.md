@@ -58,3 +58,6 @@ Then from Prof. Stephen Guy's advice, I implemented HRVO with ClearPath on CUDA.
 ## Performance Analysis
 
 Note: This is not heavily optimized and it not a particularly stable implementation, so there could be differences once things are fixed more.
+
+![](img/gpu_vs_cpu.png)
+
