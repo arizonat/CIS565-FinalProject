@@ -4,12 +4,10 @@ CUDA-accelerated Crowd Simulation with HRVO and ClearPath
 
 Levi Cai
 
-NOTE: Currently used intersection implementation from Snape's HRVO implementation: https://github.com/snape/HRVO
-
 ![](img/200_robots.PNG)
 
 Papers/Resources Used:
-
+* NOTE: Currently used intersection implementation from Snape's HRVO implementation: https://github.com/snape/HRVO
 * ClearPath algorithm: http://gamma.cs.unc.edu/CA/ClearPath.pdf
 * General collision avoidance: http://gamma.cs.unc.edu/CA/
 * RVO with random sampling: http://gamma.cs.unc.edu/RVO/
