@@ -40,7 +40,7 @@ The latest approach with the most stable results are provided by HRVO, and it is
 Parallelized across agents:
  * For each agent find its neighbors
 
-Parallelized across neighbors:
+Parallelized across neighbors (use stream compaction to only iterate over agents with the same # neighbors at a time):
 * For each neighbor, compute the 
 * For each neighbor, compute the HRVO between the original agent and the neighbor
 
