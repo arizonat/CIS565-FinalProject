@@ -3,8 +3,8 @@
 #include <thrust/device_ptr.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
-#include <thrust/unique.h>
-#include <thrust/copy.h>
+//#include <thrust/unique.h>
+//#include <thrust/copy.h>
 #include <stdio.h>
 #include <cuda.h>
 #include <cmath>
@@ -15,15 +15,17 @@
 #include <glm/gtc/constants.hpp>
 #include "utilityCore.hpp"
 #include "kernel.h"
+
+//#include <chrono>
 //#include <vector>
 
 #define checkCUDAErrorWithLine(msg) checkCUDAError(msg, __LINE__)
 
 #define sign(x) (x>0)-(x<0)
 
-#define UNIFORM_GRID
-//#define GPU_NN
-//#define CPU_UNIFORM_GRID
+#define CUDA_UG
+//#define CUDA_NN
+//#define CPU_UG
 //#define CPU_NN
 
 //#define INFINITY 0x7f800000
@@ -54,12 +56,12 @@ void checkCUDAError(const char *msg, int line = -1) {
 /*! Block size used for CUDA kernel launch. */
 #define blockSize 1024 //128
 #define robot_radius 0.5 // 0.5 default
-#define circle_radius 1.5 // 10 for 30 robots, 30 for 100 robots
+#define circle_radius 40 // 10 for 30 robots, 30 for 100 robots
 #define desired_speed 3.0f // 3.0 default
 
-#define GRIDMAX 10 // Must be even, creates grid of GRIDMAX x GRIDMAX size
+#define GRIDMAX 50 // Must be even, creates grid of GRIDMAX x GRIDMAX size
 
-#define NNRADIUS 4.0f // 2.0 default, 1.5 for 100 robots
+#define NNRADIUS 3.0f // 2.0 default, 1.5 for 100 robots
 
 // Experimental sampling
 #define MAX_VEL 4.0f // 3.0 default
@@ -391,8 +393,6 @@ void ClearPath::initSimulation(int N) {
 
 	kernInitAgents<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_agents, scene_scale, robot_radius);
 	checkCUDAErrorWithLine("kernInitAgents failed!");
-
-
 
     cudaThreadSynchronize();
 }
@@ -906,7 +906,7 @@ __global__ void kernGetSubsetIdxes(int numAgents, int* idxes, bool* indicators, 
 * Nearest Neighbors CPU Versions *
 **********************************/
 
-void kernComputeNeighbors(int N, int* neighbors, int* num_neighbors, agent* agents){
+void computeNeighbors(int N, int* neighbors, int* num_neighbors, agent* agents){
 	for (int index = 0; index < N; index++){
 		int maxNeighbors = N - 1;
 		int numNeighbors = 0;
@@ -1088,11 +1088,6 @@ __global__ void kernUGStartIdxes(int numAgents, int* startIdx, UGEntry* ug_list)
  */
 void ClearPath::stepSimulation(float dt, int iter) {
 
-	//cudaEvent_t start, stop;
-	//cudaEventCreate(&start);
-	//cudaEventCreate(&stop);
-	//cudaEventRecord(start);
-
 	dim3 fullBlocksPerGrid((numAgents + blockSize - 1) / blockSize);
 
 	// Update all the desired velocities given current positions
@@ -1106,7 +1101,6 @@ void ClearPath::stepSimulation(float dt, int iter) {
 	dim3 fullBlocksForUG((GRIDMAX*GRIDMAX + blockSize - 1) / blockSize);
 
 	// Free everything
-	
 	cudaFree(dev_unique_indicators);
 	cudaFree(dev_unique_idxes);
 
@@ -1135,13 +1129,15 @@ void ClearPath::stepSimulation(float dt, int iter) {
 
 	// Compute Neighbors with GPU Uniform Grid
 #ifdef CUDA_UG
+	/*
 	cudaEvent_t startUG, stopUG;
 	cudaEventCreate(&startUG);
 	cudaEventCreate(&stopUG);
 	cudaEventRecord(startUG);
-	kernUpdateUniformGrid<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_uglist, dev_agents);
-	//cudaThreadSynchronize();
+	*/
 
+	kernUpdateUniformGrid<<<fullBlocksPerGrid, blockSize>>>(numAgents, dev_uglist, dev_agents);
+	
 	// Sort by cell id
 	thrust::device_ptr<UGEntry> thrust_uglist = thrust::device_pointer_cast(dev_uglist);
 	thrust::sort(thrust::device,thrust_uglist, thrust_uglist+numAgents, UGComp());
@@ -1153,37 +1149,18 @@ void ClearPath::stepSimulation(float dt, int iter) {
 	// Get the neighbors
 	kernComputeUGNeighbors<<<fullBlocksPerGrid, blockSize>>>(numAgents, numNeighbors, dev_ug_neighbors, dev_num_neighbors, dev_agents, dev_startIdx, dev_uglist);
 	
+	/*
 	cudaEventRecord(stopUG);
 	cudaEventSynchronize(stopUG);
 	float millisecondsUG = 0;
 	cudaEventElapsedTime(&millisecondsUG, startUG, stopUG);
 	printf("UG: %f\n", millisecondsUG);
+	*/
 #endif
 
-	// Compute Neighbors with CPU Uniform Grid
-#ifdef CPU_UG
-	hst_agents_ = (agent*)malloc(numAgents*sizeof(agent));
 
-	hst_uglist_ = (UGEntry*)malloc(numAgents*sizeof(UGEntry));
-	hst_startIdx_ = (int*)malloc(GRIDMAX*GRIDMAX*sizeof(int));
-	hst_ug_neighbors_ = (int*)malloc((numAgents - 1)*numAgents*sizeof(int));
-	hst_num_neighbors_ = (int*)malloc(numAgents*sizeof(int));
 
-	cudaMemcpy(hst_agents_, dev_agents, numAgents*sizeof(agent), cudaMemcpyDeviceToHost);
-
-	updateUniformGrid(numAgents, hst_uglist_, hst_agents_);
-	thrust::sort(thrust::host, hst_uglist_, hst_uglist_+numAgents, UGComp());
-
-	initStartIdxes(GRIDMAX*GRIDMAX, hst_startIdx_);
-	UGStartIdxes(numAgents, hst_startIdx_, hst_uglist_);
-	computeUGNeighbors(numAgents, numNeighbors, hst_ug_neighbors_, hst_num_neighbors_, hst_agents_, hst_startIdx_, hst_uglist_);
-
-	cudaMemcpy(dev_ug_neighbors, hst_ug_neighbors_, numAgents*numNeighbors*sizeof(int), cudaMemcpyHostToDevice);
-	cudaMemcpy(dev_num_neighbors, hst_num_neighbors_, numAgents*sizeof(int), cudaMemcpyHostToDevice);
-#endif
-
-#ifdef GPU_NN
-
+#ifdef CUDA_NN
 	cudaEvent_t startN, stopN;
 	cudaEventCreate(&startN);
 	cudaEventCreate(&stopN);
@@ -1196,24 +1173,58 @@ void ClearPath::stepSimulation(float dt, int iter) {
 	float millisecondsN = 0;
 	cudaEventElapsedTime(&millisecondsN, startN, stopN);
 	printf("No grid: %f\n", millisecondsN);
+#endif
 
+#ifdef defined(CPU_UG) || defined(CPU_NN)
+	std::chrono::time_point<std::chrono::system_clock> start, end;
+	start = std::chrono::system_clock::now();
+
+	hst_agents_ = (agent*)malloc(numAgents*sizeof(agent));
+
+	hst_uglist_ = (UGEntry*)malloc(numAgents*sizeof(UGEntry));
+	hst_startIdx_ = (int*)malloc(GRIDMAX*GRIDMAX*sizeof(int));
+	hst_ug_neighbors_ = (int*)malloc(numNeighbors*numAgents*sizeof(int));
+	hst_num_neighbors_ = (int*)malloc(numAgents*sizeof(int));
+
+	cudaMemcpy(hst_agents_, dev_agents, numAgents*sizeof(agent), cudaMemcpyDeviceToHost);
+#endif
+
+	// Compute Neighbors with CPU Uniform Grid
+#ifdef CPU_UG
+	updateUniformGrid(numAgents, hst_uglist_, hst_agents_);
+	thrust::sort(thrust::host, hst_uglist_, hst_uglist_+numAgents, UGComp());
+
+	initStartIdxes(GRIDMAX*GRIDMAX, hst_startIdx_);
+	UGStartIdxes(numAgents, hst_startIdx_, hst_uglist_);
+	/*
+	for (int i = 0; i < numAgents; i++){
+		printf("(cell %d, robot %d)\n", hst_uglist_[i].cellId, hst_uglist_[i].agentId);
+	}
+
+	for (int i = 0; i < GRIDMAX*GRIDMAX; i++){
+		if (hst_startIdx_[i] > -1){
+			printf("(cell %d, robot %d)\n", i, hst_startIdx_[i]);
+		}
+	}
+	*/
+	computeUGNeighbors(numAgents, numNeighbors, hst_ug_neighbors_, hst_num_neighbors_, hst_agents_, hst_startIdx_, hst_uglist_);
+
+	end = std::chrono::system_clock::now();
+	std::chrono::duration<double> elapsed_seconds = end - start;
+	printf("CPU UG: %f\n",elapsed_seconds.count());
 #endif
 
 #ifdef CPU_NN
+	computeNeighbors(numAgents, hst_ug_neighbors_, hst_num_neighbors_, hst_agents_);
 
-	cudaEvent_t startN, stopN;
-	cudaEventCreate(&startN);
-	cudaEventCreate(&stopN);
-	cudaEventRecord(startN);
+	end = std::chrono::system_clock::now();
+	std::chrono::duration<double> elapsed_seconds = end - start;
+	printf("CPU NN: %f\n", elapsed_seconds.count());
+#endif
 
-	kernComputeNeighbors << <fullBlocksPerGrid, blockSize >> >(numAgents, dev_ug_neighbors, dev_num_neighbors, dev_agents);
-
-	cudaEventRecord(stopN);
-	cudaEventSynchronize(stopN);
-	float millisecondsN = 0;
-	cudaEventElapsedTime(&millisecondsN, startN, stopN);
-	printf("No grid: %f\n", millisecondsN);
-
+#ifdef defined(CPU_UG) || defined(CPU_NN)
+	cudaMemcpy(dev_ug_neighbors, hst_ug_neighbors_, numAgents*numNeighbors*sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpy(dev_num_neighbors, hst_num_neighbors_, numAgents*sizeof(int), cudaMemcpyHostToDevice);
 #endif
 
 	// Compute the unique neighbor counts
@@ -1263,7 +1274,6 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		// Get current neighbors
 		kernIndicateNeighborCount<<<fullBlocksPerGrid, blockSize>>>(numAgents, n, dev_indicators, dev_num_neighbors);
 		thrust::exclusive_scan(thrust::device, dev_indicators, dev_indicators+numAgents, dev_indicator_sum);
-
 		checkCUDAErrorWithLine("thrust failed?");
 
 		num_sub_agents = 0;
@@ -1271,7 +1281,6 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		cudaMemcpy(&last_indicator, dev_indicators + numAgents-1, sizeof(bool), cudaMemcpyDeviceToHost);
 		cudaMemcpy(&num_sub_agents, dev_indicator_sum + numAgents-1, sizeof(int), cudaMemcpyDeviceToHost);
 		num_sub_agents += last_indicator;
-
 		checkCUDAErrorWithLine("computing numbers failed?");
 
 		if (num_sub_agents == 0) continue;
@@ -1291,8 +1300,8 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		int numNaiveCandidates = 2 * numHRVOs;
 		int numMaxVelCandidates = 4 * numHRVOs;
 		int numIntersectionCandidates = 4 * numHRVOs * (numHRVOs - 1);
-		//numCandidates = numNaiveCandidates + numMaxVelCandidates + numIntersectionCandidates;
-		numCandidates = numNaiveCandidates + numIntersectionCandidates;
+		numCandidates = numNaiveCandidates + numMaxVelCandidates + numIntersectionCandidates;
+		//numCandidates = numNaiveCandidates + numIntersectionCandidates;
 		totCandidates = num_sub_agents * numCandidates;
 
 		cudaMalloc((void**)&dev_idx, num_sub_agents*sizeof(int));
@@ -1313,6 +1322,8 @@ void ClearPath::stepSimulation(float dt, int iter) {
 
 		//printf("Candidates: %d,  blocks: %d\n", totCandidates, fullBlocksForCandidates.x);
 
+		printf("-----Num Neighbors: %d-----\n",n);
+
 		kernGetSubsetIdxes<<<fullBlocksPerGrid,blockSize>>>(numAgents, dev_idx, dev_indicators, dev_indicator_sum, dev_agents);
 		checkCUDAErrorWithLine("cudaMalloc subset idxes failed!");
 
@@ -1322,8 +1333,24 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		kernGetSubsetNeighborIds<<<fullBlocksForNeighborIds, blockSize>>>(num_sub_agents*n, n, numNeighbors, dev_neighbor_ids, dev_ug_neighbors, dev_idx);
 		checkCUDAErrorWithLine("cudaMalloc subsetneighborsid failed!");
 
+		cudaEvent_t startHRVO, stopHRVO;
+		cudaEventCreate(&startHRVO);
+		cudaEventCreate(&stopHRVO);
+		cudaEventRecord(startHRVO);
+
 		kernComputeHRVOs<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, numHRVOs, num_sub_agents, dev_hrvos, dev_agent_ids, dev_agents, dev_neighbor_ids, dt);
 		checkCUDAErrorWithLine("cudaMalloc dev_goals failed!");
+
+		cudaEventRecord(stopHRVO);
+		cudaEventSynchronize(stopHRVO);
+		float millisecondsHRVO = 0;
+		cudaEventElapsedTime(&millisecondsHRVO, startHRVO, stopHRVO);
+		printf("HRVO: %f\n", millisecondsHRVO);
+
+		cudaEvent_t startCAN, stopCAN;
+		cudaEventCreate(&startCAN);
+		cudaEventCreate(&stopCAN);
+		cudaEventRecord(startCAN);
 
 		kernInitCandidateVels<<<fullBlocksForCandidates, blockSize>>>(totCandidates, dev_candidates);
 		checkCUDAErrorWithLine("cudaMalloc cand vels failed!");
@@ -1331,18 +1358,46 @@ void ClearPath::stepSimulation(float dt, int iter) {
 		kernComputeNaiveCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, num_sub_agents, numHRVOs, numCandidates, dev_candidates, dev_hrvos, dev_agent_ids, dev_agents);
 		checkCUDAErrorWithLine("cudaMalloc naive vels failed!");
 
-		//kernComputeMaxCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, num_sub_agents, numHRVOs, numCandidates, numNaiveCandidates, dev_candidates, dev_hrvos, dev_agent_ids, dev_agents);
-		//checkCUDAErrorWithLine("cudaMalloc max vels failed!");
+		kernComputeMaxCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, num_sub_agents, numHRVOs, numCandidates, numNaiveCandidates, dev_candidates, dev_hrvos, dev_agent_ids, dev_agents);
+		checkCUDAErrorWithLine("cudaMalloc max vels failed!");
 
-		//kernComputeIntersectionCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, num_sub_agents, numHRVOs, numCandidates, numNaiveCandidates+numMaxVelCandidates, dev_candidates, dev_hrvos, dev_agent_ids, dev_agents);
-		kernComputeIntersectionCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, num_sub_agents, numHRVOs, numCandidates, numNaiveCandidates, dev_candidates, dev_hrvos, dev_agent_ids, dev_agents);
+		kernComputeIntersectionCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, num_sub_agents, numHRVOs, numCandidates, numNaiveCandidates+numMaxVelCandidates, dev_candidates, dev_hrvos, dev_agent_ids, dev_agents);
+		//kernComputeIntersectionCandidateVels<<<fullBlocksForHRVOs, blockSize>>>(totHRVOs, num_sub_agents, numHRVOs, numCandidates, numNaiveCandidates, dev_candidates, dev_hrvos, dev_agent_ids, dev_agents);
 		checkCUDAErrorWithLine("cudaMalloc intersection vels failed!");
+
+		cudaEventRecord(stopCAN);
+		cudaEventSynchronize(stopCAN);
+		float millisecondsCAN = 0;
+		cudaEventElapsedTime(&millisecondsCAN, startCAN, stopCAN);
+		printf("Candidates: %f\n", millisecondsCAN);
+
+		cudaEvent_t startVALID, stopVALID;
+		cudaEventCreate(&startVALID);
+		cudaEventCreate(&stopVALID);
+		cudaEventRecord(startVALID);
 
 		kernComputeValidCandidateVels<<<fullBlocksForCandidates, blockSize>>>(totCandidates, num_sub_agents, numHRVOs, numCandidates, dev_candidates, dev_hrvos, dev_agents);
 		checkCUDAErrorWithLine("cudaMalloc compute valid vels failed!");
 
+		cudaEventRecord(stopVALID);
+		cudaEventSynchronize(stopVALID);
+		float millisecondsVALID = 0;
+		cudaEventElapsedTime(&millisecondsVALID, startVALID, stopVALID);
+		printf("Computing Valid: %f\n", millisecondsVALID);
+
+		cudaEvent_t startBEST, stopBEST;
+		cudaEventCreate(&startBEST);
+		cudaEventCreate(&stopBEST);
+		cudaEventRecord(startBEST);
+
 		kernComputeBestVel<<<fullBlocksPerGrid, blockSize>>>(num_sub_agents, numCandidates, dev_vel_new, dev_candidates);
 		checkCUDAErrorWithLine("cudaMalloc best vels failed!");
+
+		cudaEventRecord(stopBEST);
+		cudaEventSynchronize(stopBEST);
+		float millisecondsBEST = 0;
+		cudaEventElapsedTime(&millisecondsBEST, startBEST, stopBEST);
+		printf("Selecting Best: %f\n", millisecondsBEST);
 
 		kernComputeInPCR<<<fullBlocksPerGrid, blockSize>>>(num_sub_agents, numHRVOs, dev_in_pcr, dev_hrvos, dev_agent_ids, dev_agents);
 		checkCUDAErrorWithLine("cudaMalloc in pcr failed!");
@@ -1354,10 +1409,6 @@ void ClearPath::stepSimulation(float dt, int iter) {
 	// Update the positions
 	kernUpdatePos<<<fullBlocksPerGrid, blockSize>>>(numAgents, dt, dev_agents, dev_pos);
 
-	//cudaEventRecord(stop);
-	//cudaEventSynchronize(stop);
-	//float milliseconds = 0;
-	//cudaEventElapsedTime(&milliseconds, start, stop);
-	//printf("%f\n", milliseconds);
+
 
 }
