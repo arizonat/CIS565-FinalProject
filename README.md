@@ -1,12 +1,20 @@
 ﻿CIS565 Fall 2015 - Final Project
 
-HRVO using ClearPath on CUDA
+CUDA-accelerated Crowd Simulation with HRVO and ClearPath
 
-NOTE: Intersection computation is heavily borrowed from the original HRVO implementation (from Snape: https://github.com/snape/HRVO)
+Levi Cai
 
-![](img/representative_img.PNG)
+NOTE: Currently used intersection implementation from Snape's HRVO implementation: https://github.com/snape/HRVO
 
-For my final project I am planning to implement the P-ClearPath algorithm for collision avoidance for multi-agent systems. In robotics, collision avoidance is especially important, since we use very expensive yet very fragile equipment (oh the curses of real things, they break!) Thus in large scale multi-robot settings, say in Amazon’s warehouses, it is important to be able to compute collision-free paths for large numbers of robots simultaneously. Depending on the algorithm anyway, a GPU can help, and according to the P-ClearPath paper, this should be the case.
+![](img/200_robots.PNG)
+
+Papers/Resources Used:
+
+* ClearPath algorithm: http://gamma.cs.unc.edu/CA/ClearPath.pdf
+* General collision avoidance: http://gamma.cs.unc.edu/CA/
+* RVO with random sampling: http://gamma.cs.unc.edu/RVO/
+* HRVO: http://gamma.cs.unc.edu/HRVO/
+* HRVO paper: http://gamma.cs.unc.edu/HRVO/HRVO-T-RO.pdf
 
 
 The paper I will be referencing can be found here: http://gamma.cs.unc.edu/CA/ClearPath.pdf
