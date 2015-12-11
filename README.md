@@ -6,6 +6,10 @@ Levi Cai
 
 ![](img/200_robots.PNG)
 
+Final video: https://www.youtube.com/watch?v=9E0RYBbbvJQ&feature=youtu.be
+
+Final presentation: https://docs.google.com/presentation/d/1MXH-gVVsqWDP741cm3D0KGq5vxWAhtXCxeXZsPsarFs/edit?usp=sharing
+
 Papers/Resources Used:
 * NOTE: Currently used intersection implementation from Snape's HRVO implementation: https://github.com/snape/HRVO
 * ClearPath algorithm: http://gamma.cs.unc.edu/CA/ClearPath.pdf
@@ -14,27 +18,3 @@ Papers/Resources Used:
 * HRVO: http://gamma.cs.unc.edu/HRVO/
 * HRVO paper: http://gamma.cs.unc.edu/HRVO/HRVO-T-RO.pdf
 
-
-The paper I will be referencing can be found here: http://gamma.cs.unc.edu/CA/ClearPath.pdf
-
-
-Additional videos and materials can be found here: http://gamma.cs.unc.edu/CA/
-
-
-Initial Demo
-
-
-Hope to have a simple version of the P-ClearPath algorithm running with the simple N-body simulator, probably just in 2D since all the P-ClearPath examples are in 2D. No optimizations expected, just want to see at least 2-5 robots avoid each other.
-
-
-Milestone 1
-
-Implement CPU version for comparison? 
-
-Milestone 2
-
-Implement the Uniform Grid optimization
-
-Milestone 3
-
-ALLLLL the performance checks. If there is time, extend it for non-straight paths in environments with obstacles.
