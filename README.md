@@ -2,7 +2,7 @@
 
 ## CUDA-accelerated Crowd Simulation with HRVO and ClearPath
 
-Levi Cai
+Levi Cai (www.levicai.com)
 
 ![](img/200_robots.PNG)
 
