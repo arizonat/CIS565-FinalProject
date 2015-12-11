@@ -161,7 +161,8 @@ __host__ __device__ float det2(glm::vec3 a, glm::vec3 b){
 	return a.x*b.y - a.y*b.x;
 }
 
-__host__ __device__ bool intersectRaySphere(glm::vec3 rayStarting, glm::vec3 rayNormalizedDirection, glm::vec3 sphereCenter, float radius2, float& distance){
+__host__ __device__ bool intersectRaySphere(glm::vec3 rayStarting, glm::vec3 rayNormalizedDirection, glm::vec3 sphereCenter, float radius2, float& distance1, float& distance2){
+	// Modified from the glm version to work on device
 	float eps = 0.000001f;
 
 	glm::vec3 diff = sphereCenter - rayStarting;
@@ -172,7 +173,11 @@ __host__ __device__ bool intersectRaySphere(glm::vec3 rayStarting, glm::vec3 ray
 		return false;
 	}
 	float t1 = sqrt(radius2 - dSquared);
-	distance = t0 > t1 + eps ? t0 - t1 : t0 + t1;
+
+	distance1 = t0 - t1;
+	distance2 = t0 + t1;
+
+	float distance = t0 > t1 + eps ? t0 - t1 : t0 + t1;
 	return distance > eps;
 }
 
@@ -207,7 +212,7 @@ __host__ __device__ glm::vec3 projectPointToSegment(glm::vec3 a, glm::vec3 b, gl
 	return a + t * ab;
 }
 
-__host__ __device__ glm::vec3 projectPointToRay(ray a, glm::vec3 p){
+__host__ __device__ glm::vec3 projectPointToRay(Ray a, glm::vec3 p){
 	// Projects a point to its closest location on a ray.
 	// If the projected point does not lie on the ray, it snaps to the ray origin
 	glm::vec3 ap = p - a.pos;
@@ -217,14 +222,38 @@ __host__ __device__ glm::vec3 projectPointToRay(ray a, glm::vec3 p){
 	return a.pos + a.dir * t * float(t >= 0.0);
 }
 
-__host__ __device__ glm::vec3 intersectPointRay(ray a, glm::vec3 p){
+__host__ __device__ glm::vec3 intersectPointRay(Ray a, glm::vec3 p){
 	// Finds the ray with minimal distance from a point to a ray
 	// http://stackoverflow.com/questions/5227373/minimal-perpendicular-vector-between-a-point-and-a-line
 	
 	return p - (a.pos + (glm::normalize(p-a.pos))*a.dir);
 }
 
-__host__ __device__ int sidePointSegment(ray r, glm::vec3 p){
+__host__ __device__ bool intersectRayRay(Ray a, Ray b, glm::vec3& point){
+	// Solves p1 + t1*v1 = p2 + t2*v2
+	// [t1; t2] = [v1x -v2x; v1y -v2y]^-1*(p2-p1);
+	bool isIntersection = false;
+
+	// Parallel lines cannot intersect
+	if (a.dir.x == b.dir.x && a.dir.y == b.dir.y){
+		return false;
+	}
+
+	glm::vec2 ts;
+
+	ts = glm::inverse(glm::mat2(a.dir.x, a.dir.y, -b.dir.x, -b.dir.y)) * glm::vec2(b.pos - a.pos);
+
+	if (ts.x >= 0 && ts.y >= 0){
+		point = glm::vec3(a.pos + a.dir*ts.x);
+		point.z = 0.0;
+		return true;
+		
+	}
+	return false;
+	
+}
+
+__host__ __device__ int sidePointSegment(Ray r, glm::vec3 p){
 	// Computes what side of a line a point is on
 	// http://stackoverflow.com/questions/1560492/how-to-tell-whether-a-point-is-to-the-right-or-left-side-of-a-line
 	// If ray pointing up in 2D: +1 is left, 0 is on line, -1 is right
@@ -616,7 +645,7 @@ __global__ void kernInitCandidateVels(int totCandidates, CandidateVel* candidate
 }
 
 __global__ void kernComputeNaiveCandidateVels(int totHRVOs, int numAgents, int numHRVOs, int numCandidates, CandidateVel* candidates, HRVO* hrvos, int* agent_ids, agent* agents){
-	// This computation is heavily borrowed from Snape's HRVO implementation https://github.com/snape/HRVO
+	// Project the preferred velocity onto the HRVO to get candidate velocities
 	// naive projection velocities
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 	
@@ -628,26 +657,25 @@ __global__ void kernComputeNaiveCandidateVels(int totHRVOs, int numAgents, int n
 
 		glm::vec3 prefVel = agents[agent_id].vel;
 
-		float dot1 = glm::dot(prefVel - hrvos[index].apex, hrvos[index].right);
-		float dot2 = glm::dot(prefVel - hrvos[index].apex, hrvos[index].left);
-		
 		CandidateVel candidate;
 		candidate.hrvo1 = c;
 		candidate.hrvo2 = c;
 
-		if (dot1 > 0.0f && det2(hrvos[index].right, prefVel-hrvos[index].apex) > 0.0f){
-			candidate.vel = hrvos[index].apex + dot1*hrvos[index].right;
-			candidate.distToPref = sqr(prefVel - candidate.vel);
-			candidate.valid = true;
-			if (glm::length(candidate.vel) < MAX_VEL) candidates[r*numCandidates + 2 * c] = candidate;
-		}
+		Ray right;
+		right.pos = hrvos[index].apex;
+		right.dir = hrvos[index].right;
+		candidate.vel = projectPointToRay(right, prefVel);
+		candidate.distToPref = sqr(prefVel - candidate.vel);
+		candidate.valid = true;
+		if (glm::length(candidate.vel) < MAX_VEL) candidates[r*numCandidates + 2 * c] = candidate;
 
-		if (dot2 > 0.0f && det2(hrvos[index].left, prefVel - hrvos[index].apex) < 0.0f){
-			candidate.vel = hrvos[index].apex + dot2*hrvos[index].left;
-			candidate.distToPref = sqr(prefVel - candidate.vel);
-			candidate.valid = true;
-			if (glm::length(candidate.vel) < MAX_VEL) candidates[r*numCandidates + 2 * c + 1] = candidate;
-		}
+		Ray left;
+		left.pos = hrvos[index].apex;
+		left.dir = hrvos[index].left;
+		candidate.vel = projectPointToRay(right, prefVel);
+		candidate.distToPref = sqr(prefVel - candidate.vel);
+		candidate.valid = true;
+		if (glm::length(candidate.vel) < MAX_VEL) candidates[r*numCandidates + 2 * c] = candidate;
 
 	}
 }
@@ -716,7 +744,7 @@ __global__ void kernComputeMaxCandidateVels(int totHRVOs, int numAgents, int num
 }
 
 __global__ void kernComputeIntersectionCandidateVels(int totHRVOs, int numAgents, int numHRVOs, int numCandidates, int offset, CandidateVel* candidates, HRVO* hrvos, int* agent_ids, agent* agents){
-	// This computation is heavily borrowed from Snape's HRVO implementation https://github.com/snape/HRVO
+	// Computes the intersections between all the HRVOs
 	// offset is usually the number of naiveCandidates (offset of starting location in the candidate buffer
 	// intersection projection velocities
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -731,76 +759,59 @@ __global__ void kernComputeIntersectionCandidateVels(int totHRVOs, int numAgents
 
 		CandidateVel candidate;
 
+		Ray curr_left;
+		curr_left.pos = hrvos[index].apex;
+		curr_left.dir = hrvos[index].left;
+
+		Ray curr_right;
+		curr_right.pos = hrvos[index].apex;
+		curr_right.dir = hrvos[index].right;
+
+		bool intersects;
 		int n = 0;
 		for (int i = 0; i < numHRVOs; i++){
 			if (c == i) continue;
 			candidate.hrvo1 = c;
 			candidate.hrvo2 = i;
 
-			//hrvos[index] vs hrvos[r*numHRVOs+i]
 			int j = r*numHRVOs + i;
 			float s, t;
 
-			// Find intersection of right and right
-			float d = det2(hrvos[index].right, hrvos[j].right);
+			Ray left;
+			left.pos = hrvos[j].apex;
+			left.dir = hrvos[j].left;
 
-			if (d != 0.0f){
-				s = det2(hrvos[j].apex - hrvos[index].apex, hrvos[j].right) / d;
-				t = det2(hrvos[j].apex - hrvos[index].apex, hrvos[index].right) / d;
-				
-				if (s >= 0.0f && t >= 0.0f){
-					candidate.vel = hrvos[index].apex + s*hrvos[index].right;
-					candidate.distToPref = sqr(prefVel - candidate.vel);
-					candidate.valid = true;
-					if (glm::length(candidate.vel) < MAX_VEL) candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n] = candidate;
-				}
+			Ray right;
+			right.pos = hrvos[j].apex;
+			right.dir = hrvos[j].right;
+
+			intersects = intersectRayRay(curr_left, left, candidate.vel);
+			if (intersects){
+				candidate.distToPref = sqr(prefVel - candidate.vel);
+				candidate.valid = true;
+				if (glm::length(candidate.vel) < MAX_VEL) candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n] = candidate;
 			}
 
-			// Find intersection of left and right
-			d = det2(hrvos[index].left, hrvos[j].right);
-
-			if (d != 0.0f){
-				s = det2(hrvos[j].apex - hrvos[index].apex, hrvos[j].right) / d;
-				t = det2(hrvos[j].apex - hrvos[index].apex, hrvos[index].left) / d;
-
-				if (s >= 0.0f && t >= 0.0f){
-					candidate.vel = hrvos[index].apex + s*hrvos[index].left;
-					candidate.distToPref = sqr(prefVel - candidate.vel);
-					candidate.valid = true;
-					if (glm::length(candidate.vel) < MAX_VEL) candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n + 1] = candidate;
-				}
+			intersects = intersectRayRay(curr_left, right, candidate.vel);
+			if (intersects){
+				candidate.distToPref = sqr(prefVel - candidate.vel);
+				candidate.valid = true;
+				if (glm::length(candidate.vel) < MAX_VEL) candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n + 1] = candidate;
 			}
 
-			// Find intersection of right and left
-			d = det2(hrvos[index].right, hrvos[j].left);
-
-			if (d != 0.0f){
-				s = det2(hrvos[j].apex - hrvos[index].apex, hrvos[j].left) / d;
-				t = det2(hrvos[j].apex - hrvos[index].apex, hrvos[index].right) / d;
-
-				if (s >= 0.0f && t >= 0.0f){
-					candidate.vel = hrvos[index].apex + s*hrvos[index].right;
-					candidate.distToPref = sqr(prefVel - candidate.vel);
-					candidate.valid = true;
-					if (glm::length(candidate.vel) < MAX_VEL) candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n + 2] = candidate;
-				}
+			intersects = intersectRayRay(curr_right, left, candidate.vel);
+			if (intersects){
+				candidate.distToPref = sqr(prefVel - candidate.vel);
+				candidate.valid = true;
+				if (glm::length(candidate.vel) < MAX_VEL) candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n + 2] = candidate;
 			}
 
-			// Find intersection of left and left
-			d = det2(hrvos[index].left, hrvos[j].left);
-
-			if (d != 0.0f){
-				s = det2(hrvos[j].apex - hrvos[index].apex, hrvos[j].left) / d;
-				t = det2(hrvos[j].apex - hrvos[index].apex, hrvos[index].left) / d;
-
-				if (s >= 0.0f && t >= 0.0f){
-					candidate.vel = hrvos[index].apex + s*hrvos[index].left;
-					candidate.distToPref = sqr(prefVel - candidate.vel);
-					candidate.valid = true;
-					if (glm::length(candidate.vel) < MAX_VEL) candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n + 3] = candidate;
-				}
+			intersects = intersectRayRay(curr_right, right, candidate.vel);
+			if (intersects){
+				candidate.distToPref = sqr(prefVel - candidate.vel);
+				candidate.valid = true;
+				if (glm::length(candidate.vel) < MAX_VEL) candidates[r*numCandidates + offset + (4 * (numHRVOs - 1))*c + 4 * n + 3] = candidate;
 			}
-
 			n++;
 		}
 	}
@@ -1087,6 +1098,53 @@ __global__ void kernUGStartIdxes(int numAgents, int* startIdx, UGEntry* ug_list)
  * Step the entire N-body simulation by `dt` seconds.
  */
 void ClearPath::stepSimulation(float dt, int iter) {
+
+	glm::vec3 prefVel = glm::vec3(2.5f, 3.0f, 0.0f);
+	glm::vec3 apex = glm::vec3(2.0, 2.0, 0.0);
+	glm::vec3 left = glm::normalize(glm::vec3(-0.5, 1.0, 0.0));
+	glm::vec3 right = glm::normalize(glm::vec3(0.5, 1.0, 0.0));
+
+	float s;
+	float t;
+	bool intersects = intersectRaySphere(apex, left, glm::vec3(0.0, 0.0, 0.0), 3.0f*3.0f, s, t);
+
+
+
+	/*
+	glm::vec3 prefVel = glm::vec3(2.5f, 3.0f, 0.0f);
+	glm::vec3 apex = glm::vec3(3.0, 2.0, 0.0);
+	glm::vec3 left = glm::normalize(glm::vec3(-0.5,1.0,0.0));
+	glm::vec3 right = glm::normalize(glm::vec3(0.5, 1.0, 0.0));
+
+	float dot1 = glm::dot(prefVel - apex, right);
+	float dot2 = glm::dot(prefVel - apex, left);
+
+	glm::vec3 resultOnRight;
+	glm::vec3 resultOnLeft;
+
+	if (dot1 > 0.0f && det2(right, prefVel - apex) > 0.0f){
+		resultOnRight = apex + dot1*right;
+
+	}
+
+	if (dot2 > 0.0f && det2(left, prefVel - apex) < 0.0f){
+		resultOnLeft = apex + dot2*left;
+	}
+
+	printf("right: (%f, %f, %f)\n", resultOnRight.x, resultOnRight.y, resultOnRight.z);
+	printf("left: (%f, %f, %f)\n", resultOnLeft.x, resultOnLeft.y, resultOnLeft.z);
+
+	Ray r;
+	r.pos = apex;
+	r.dir = left;
+	glm::vec3 pointOnLeft = projectPointToRay(r, prefVel);
+	r.pos = apex;
+	r.dir = right;
+	glm::vec3 pointOnRight = projectPointToRay(r, prefVel);
+
+	printf("right mine: (%f, %f, %f)\n", pointOnRight.x, pointOnRight.y, pointOnRight.z);
+	printf("left mine: (%f, %f, %f)\n", pointOnLeft.x, pointOnLeft.y, pointOnLeft.z);
+	*/
 
 	dim3 fullBlocksPerGrid((numAgents + blockSize - 1) / blockSize);
 
