@@ -49,10 +49,15 @@ and here it is breaking on 4: https://www.youtube.com/watch?v=BA9yAxEHa7g
 
 ![](img/rvo_6.PNG)
 
-For my second attempt, I implemented the algorithm from the **RVO paper**. Here the difference is that we no longer compute intersection points and find velocities along the boundaries. Instead we compute the velcoity regions that result in collisions as before, but for each agent we randomly sample _N_ velocities (I used _N_ = 250 as in the paper). We then select the velocity that is nearest to the desired velocity AND is not inside the colliding regions. This resulted in a slightly easier-to-compute algorithm and worked fairly well for up to 6 robots: . Beyond that it seemed to give strange results.
+For my second attempt, I implemented the algorithm from the **RVO paper**. Here the difference is that we no longer compute intersection points and find velocities along the boundaries. Instead we compute the velcoity regions that result in collisions as before, but for each agent we randomly sample _N_ velocities (I used _N_ = 250 as in the paper). We then select the velocity that is nearest to the desired velocity AND is not inside the colliding regions. This resulted in a slightly easier-to-compute algorithm and worked fairly well for up to 6 robots: https://www.youtube.com/watch?v=HOVsiz8CZ-4&feature=youtu.be. Beyond that it seemed to give strange results.
 
 #### HRVO with ClearPath
+
+Then from Prof. Stephen Guy's advice, I implemented HRVO with ClearPath on CUDA. See final algorithm above for details.
 
 ## Performance Analysis
 
 Note: This is not heavily optimized and it not a particularly stable implementation, so there could be differences once things are fixed more.
+
+![](img/gpu_vs_cpu.png)
+
