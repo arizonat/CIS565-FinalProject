@@ -18,3 +18,6 @@ Papers/Resources Used:
 * HRVO: http://gamma.cs.unc.edu/HRVO/
 * HRVO paper: http://gamma.cs.unc.edu/HRVO/HRVO-T-RO.pdf
 
+Debug views:
+
+![](img/debug_view_labelled.PNG)
