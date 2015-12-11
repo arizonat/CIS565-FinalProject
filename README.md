@@ -30,7 +30,13 @@ Special thanks to the authors: Prof. Stephen Guy and Prof. Ming Lin
 
 ![](img/hrvo_38_random.PNG)
 
+### General Approach
+
 The general approach to all of the above algorithms for collision avoidance is to model all velocities of every agent that *will* results in a collision. Then, if the current velocity is inside the set of colliding-velocities, to find the velocity nearest to the original, but is no longer in the set of colliding velocities.
+
+### Optimizations
+
+I implemented a uniform grid for nearest neighbor computations as well as a few implementations of stream compaction for the parallelization steps in order to get semi-reasonable performance. There are some other ideas present in the ClearPath paper for additional optimizations, but I did not have a chance to implement them fully. It is important to note that the Uniform Grid actually did not improve performance that much for smaller samples of robots (< 200), which is the only set that I have stable simulations for.
 
 ## Things I tried
 
@@ -60,7 +66,14 @@ Then from Prof. Stephen Guy's advice, I implemented HRVO with ClearPath on CUDA.
 Note: This is not heavily optimized and it not a particularly stable implementation, so there could be differences once things are fixed more.
 
 ![](img/gpu_vs_cpu.png)
+
 Units on left are ms.
 
+![](img/sparse_uniform_grid_comparison.png)
 
+![](img/dense_uniform_grid_comparison.png)
+
+![](img/sparse_kernel.png)
+
+![](img/dense_kernel.png)
 
