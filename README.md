@@ -17,6 +17,7 @@ Papers/Resources Used:
 * RVO paper: http://gamma.cs.unc.edu/RVO/
 * HRVO: http://gamma.cs.unc.edu/HRVO/
 * HRVO paper: http://gamma.cs.unc.edu/HRVO/HRVO-T-RO.pdf
+* Uniform Grid explanation: https://github.com/jeremynewlin/Accel
 
 Special thanks to the authors: Prof. Stephen Guy and Prof. Ming Lin
 
@@ -65,15 +66,28 @@ Then from Prof. Stephen Guy's advice, I implemented HRVO with ClearPath on CUDA.
 
 Note: This is not heavily optimized and it not a particularly stable implementation, so there could be differences once things are fixed more.
 
+### Overall comparison of HRVO+ClearPath on CUDA vs. CPU
+
 ![](img/gpu_vs_cpu.png)
 
 Units on left are ms.
+
+It is fairly clear that the GPU here gives significant advantage over the CPU implementation for large numbers of agents, especially if they are fairly densely packed. However, for smaller numbers of agents, or for sparse settings, the advantage is not necessarily as clear and both can run at 30+ FPS fairly well (GPU at 60+ FPS for longer).
+
+### Uniform Grid vs. Naive Nearest Neighbors on CUDA and CPU
 
 ![](img/sparse_uniform_grid_comparison.png)
 
 ![](img/dense_uniform_grid_comparison.png)
 
+Here we can see the effectiveness of the Uniform Grid optimization. It gives us the most benefit when there are a large number of neighbors to consider, again, with < 100 agents or so, the difference is quite small, and in fact in smaller number of agents, the naive nearest-neighbor computation is actually faster. It is also clearly affected by the sparsity of the agents relative to the size of the neighborhood being considered.
+
+### Kernel runtimes
+
 ![](img/sparse_kernel.png)
 
 ![](img/dense_kernel.png)
+
+Here we can see the relative time spent doing certain actions. Most of the time, both in dense and sparse settings, is spent picking the best velocities. This is because the selection algorithm is incredibly naive (iterates through ALL possible velocity candidates before selecting the one nearest to the current velocity that is also valid). There are several possible optimizations here, such as stream compacting out the invalid ones, somehow sorting beforehand, and only selecting a new velocity when absolutely necessary (the sparse one does not need to spend that much time picking a new velocity). The other ones make sense overall, as generating candidates should take an order of magnitude longer than the rest as there are 2*N + 4*N + 4*(N-1)*(N-2) possible candidates per agent.
+
 
